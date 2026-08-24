@@ -1,0 +1,21 @@
+{
+  "name": "africlay-server",
+  "version": "1.0.0",
+  "description": "This is the server Side of the Africlay ecommerce platform",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AfriClay/Africlay-server.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/AfriClay/Africlay-server/issues"
+  },
+  "homepage": "https://github.com/AfriClay/Africlay-server#readme"
+}
