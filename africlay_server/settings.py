@@ -43,7 +43,12 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    # core apps
     'authapp',
+    'store_management',
+    'product_management',
+    'shopping',
+    #swagger
     'drf_spectacular',
     'drf_spectacular_sidecar',
 ]
