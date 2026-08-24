@@ -1,0 +1,41 @@
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: africlay_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-africlay_db}
+      POSTGRES_USER: ${DB_USER:-africlay}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-africlay}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-africlay} -d ${DB_NAME:-africlay_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: africlay_backend
+    restart: unless-stopped
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=db
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
