@@ -65,7 +65,6 @@ MIDDLEWARE = [
 ]
 
 AUTH_USER_MODEL = 'authapp.User'
-DEFAULT_AUTHENTICATION_CLASSES=' authapp.authentication.JWTAuthentication'
 
 REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
@@ -186,4 +185,4 @@ MEDIA_ROOT = BASE_DIR / 'media'
 
 # Email Configuration
 EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
-DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'Africlay <no-reply@africlay.com>')
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL')

@@ -12,7 +12,7 @@ dependencies = [
     "drf-spectacular-sidecar>=2026.8.1",
     "pillow>=12.3.0",
     "psycopg[binary]>=3.3.4",
-    "pyjwt>=2.13.0",
+    "pyjwt==2.10.1",
     "python-dotenv>=1.2.3",
     "requests>=2.34.2",
 ]
