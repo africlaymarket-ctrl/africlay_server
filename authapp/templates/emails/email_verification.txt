@@ -1,0 +1,15 @@
+Welcome to Africlay!
+
+Hi {{ user.profile.first_name|default:user.email }},
+
+Thank you for creating an account on Africlay. Please use the verification code below to verify your email address and activate your account:
+
+Verification Code: {{ otp_code }}
+
+This code is valid for {{ valid_minutes|default:15 }} minutes.
+
+If you did not sign up for an Africlay account, please disregard this email.
+
+-- 
+Africlay Team
+https://africlay.com

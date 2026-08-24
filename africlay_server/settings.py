@@ -64,18 +64,39 @@ MIDDLEWARE = [
 
 ]
 
+AUTH_USER_MODEL = 'authapp.User'
+DEFAULT_AUTHENTICATION_CLASSES=' authapp.authentication.JWTAuthentication'
+
 REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    'DEFAULT_AUTHENTICATION_CLASSES': (
+        'authapp.authentication.JWTAuthentication',
+        'rest_framework.authentication.SessionAuthentication',
+    ),
+    'DEFAULT_PERMISSION_CLASSES': (
+        'rest_framework.permissions.IsAuthenticated',
+    ),
 }
 
 SPECTACULAR_SETTINGS = {
-    'TITLE': 'Africlay Server',
-    'DESCRIPTION': 'Africlay Server API',
+    'TITLE': 'Africlay Server API',
+    'DESCRIPTION': 'API documentation for Africlay Ecommerce Platform',
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,   # don't put schema in the Swagger UI page
     'SWAGGER_UI_DIST': 'SIDECAR',    # use the sidecar package for Swagger UI
     'SWAGGER_UI_FAVICON_HREF': 'SIDECAR',
     'REDOC_DIST': 'SIDECAR',         # use the sidecar package for ReDoc
+    'SECURITY': [{'BearerAuth': []}],
+    'APPEND_COMPONENTS': {
+        'securitySchemes': {
+            'BearerAuth': {
+                'type': 'http',
+                'scheme': 'bearer',
+                'bearerFormat': 'JWT',
+                'description': 'Enter JWT Bearer token in format: Bearer <token>',
+            }
+        }
+    },
 }
 
 ROOT_URLCONF = 'africlay_server.urls'
@@ -158,5 +179,11 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
-# 
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
+# Email Configuration
+EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'Africlay <no-reply@africlay.com>')

@@ -55,14 +55,14 @@ docker compose version
    DB_NAME=africlay_db
    DB_USER=africlay
    DB_PASSWORD=africlay
-   DB_HOST=db
+   DB_HOST=localhost
    DB_PORT=5432
    ```
 
 > **Note:**
-> - When running via **Docker Compose**, `DB_HOST` is set to `db` (the PostgreSQL service name).
-> - When running locally outside Docker while connecting to the Dockerized PostgreSQL, set `DB_HOST=localhost`.
-> - If you wish to quickly test with SQLite locally, set `DB_ENGINE=django.db.backends.sqlite3`.
+> - `DB_HOST=localhost` in `.env` enables running commands locally on your Mac (e.g. `make migrate` / `make runserver`) while connecting to the exposed database port `5432`.
+> - Inside Docker, `docker-compose.yml` automatically overrides `DB_HOST` to `db` for container-to-container networking.
+> - If you wish to quickly test with SQLite locally without running PostgreSQL, set `DB_ENGINE=django.db.backends.sqlite3`.
 
 ---
 
