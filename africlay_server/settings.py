@@ -42,6 +42,15 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'rest_framework',
+    # core apps
+    'authapp',
+    'store_management',
+    'product_management',
+    'shopping',
+    #swagger
+    'drf_spectacular',
+    'drf_spectacular_sidecar',
 ]
 
 MIDDLEWARE = [
@@ -52,7 +61,22 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+
 ]
+
+REST_FRAMEWORK = {
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Africlay Server',
+    'DESCRIPTION': 'Africlay Server API',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,   # don't put schema in the Swagger UI page
+    'SWAGGER_UI_DIST': 'SIDECAR',    # use the sidecar package for Swagger UI
+    'SWAGGER_UI_FAVICON_HREF': 'SIDECAR',
+    'REDOC_DIST': 'SIDECAR',         # use the sidecar package for ReDoc
+}
 
 ROOT_URLCONF = 'africlay_server.urls'
 
