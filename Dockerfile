@@ -8,13 +8,14 @@ WORKDIR /app
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
 # Copy dependency specifications for cached layer build
 COPY pyproject.toml uv.lock ./
 
-# Install dependencies into /app/.venv
+# Install dependencies into /opt/venv
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project
 
@@ -31,13 +32,14 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
 
-# Ensure virtual environment binaries are on PATH
-ENV PATH="/app/.venv/bin:$PATH" \
+# Ensure virtual environment is on PATH and recognized by uv
+ENV PATH="/opt/venv/bin:$PATH" \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
 # Copy pre-built virtual environment from builder stage
-COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /opt/venv /opt/venv
 
 # Copy application code
 COPY . /app
