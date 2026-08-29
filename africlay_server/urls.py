@@ -10,6 +10,9 @@ urlpatterns = [
 
     # Authentication & Accounts
     path('api/auth/', include('authapp.urls', namespace='authapp')),
+    path('api/stores/', include('store_management.urls', namespace='store_management')),
+    path('api/products/', include('product_management.urls', namespace='product_management')),
+    path('api/cart/', include('shopping.urls', namespace='shopping')),
 
     # DRF Spectacular OpenAPI & API Docs
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
