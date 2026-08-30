@@ -239,3 +239,329 @@ class CartApiTests(TestCase):
         # but the value should be numeric (can be parsed as float)
         price = response.data['product_price']
         self.assertEqual(float(price), 1000.00)
+
+
+class CheckoutApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.buyer = User.objects.create_user(
+            email='buyer@example.com',
+            password='StrongPassword123!',
+            role=UserRole.BUYER,
+            is_verified=True,
+        )
+        self.other_buyer = User.objects.create_user(
+            email='other@example.com',
+            password='StrongPassword123!',
+            role=UserRole.BUYER,
+            is_verified=True,
+        )
+        self.seller = User.objects.create_user(
+            email='seller@example.com',
+            password='StrongPassword123!',
+            role=UserRole.SELLER,
+            is_verified=True,
+        )
+        self.store = Store.objects.create(
+            owner=self.seller,
+            name='Test Store',
+            slug='test-store',
+        )
+        self.product = Product.objects.create(
+            store=self.store,
+            name='Test Product',
+            slug='test-product',
+            sku='TEST-001',
+            price='1000.00',
+            stock_quantity=10,
+            status='published',
+        )
+        self.product2 = Product.objects.create(
+            store=self.store,
+            name='Test Product 2',
+            slug='test-product-2',
+            sku='TEST-002',
+            price='500.00',
+            stock_quantity=5,
+            status='published',
+        )
+
+    def authenticate_as(self, user):
+        token = generate_access_token(user)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+
+    def test_successful_checkout_creates_order(self):
+        """Test that successful checkout creates an order and clears cart."""
+        self.authenticate_as(self.buyer)
+        
+        # Add products to cart
+        self.client.post(
+            reverse('shopping:cart-item-list'),
+            {'product': str(self.product.id), 'quantity': 2},
+            format='json',
+        )
+        self.client.post(
+            reverse('shopping:cart-item-list'),
+            {'product': str(self.product2.id), 'quantity': 1},
+            format='json',
+        )
+        
+        # Checkout
+        checkout_response = self.client.post(
+            reverse('shopping:checkout'),
+            {
+                'shipping_address': '123 Main St',
+                'shipping_city': 'Nairobi',
+                'shipping_postal_code': '00100',
+                'shipping_country': 'Kenya',
+            },
+            format='json',
+        )
+        
+        # Verify order created with correct total: (1000*2) + (500*1) = 2500
+        self.assertEqual(checkout_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(checkout_response.data['status'], 'pending')
+        self.assertEqual(float(checkout_response.data['total_amount']), 2500.00)
+        self.assertEqual(len(checkout_response.data['items']), 2)
+        
+        # Verify cart is now empty
+        cart_response = self.client.get(reverse('shopping:cart-detail'))
+        self.assertEqual(len(cart_response.data['items']), 0)
+
+    def test_checkout_decrements_product_stock(self):
+        """Test that checkout properly decrements product stock."""
+        self.authenticate_as(self.buyer)
+        
+        initial_stock = self.product.stock_quantity
+        
+        # Add product to cart and checkout
+        self.client.post(
+            reverse('shopping:cart-item-list'),
+            {'product': str(self.product.id), 'quantity': 3},
+            format='json',
+        )
+        
+        self.client.post(
+            reverse('shopping:checkout'),
+            {
+                'shipping_address': '123 Main St',
+                'shipping_city': 'Nairobi',
+                'shipping_postal_code': '00100',
+                'shipping_country': 'Kenya',
+            },
+            format='json',
+        )
+        
+        # Verify stock was decremented
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock_quantity, initial_stock - 3)
+
+    def test_checkout_with_empty_cart_fails(self):
+        """Test that checkout with empty cart returns error."""
+        self.authenticate_as(self.buyer)
+        
+        # Attempt checkout without adding items to cart
+        response = self.client.post(
+            reverse('shopping:checkout'),
+            {
+                'shipping_address': '123 Main St',
+                'shipping_city': 'Nairobi',
+                'shipping_postal_code': '00100',
+                'shipping_country': 'Kenya',
+            },
+            format='json',
+        )
+        
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('cart', response.data)
+
+    def test_checkout_with_insufficient_stock_fails(self):
+        """Test that checkout fails if product has insufficient stock between add and checkout."""
+        self.authenticate_as(self.buyer)
+        
+        # Add products to cart (5 out of 10 available)
+        self.client.post(
+            reverse('shopping:cart-item-list'),
+            {'product': str(self.product.id), 'quantity': 5},
+            format='json',
+        )
+        
+        # Manually reduce stock before checkout to simulate another buyer purchasing
+        self.product.stock_quantity = 3
+        self.product.save()
+        
+        # Attempt checkout with insufficient stock (need 5, only 3 available)
+        response = self.client.post(
+            reverse('shopping:checkout'),
+            {
+                'shipping_address': '123 Main St',
+                'shipping_city': 'Nairobi',
+                'shipping_postal_code': '00100',
+                'shipping_country': 'Kenya',
+            },
+            format='json',
+        )
+        
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('product', response.data)
+
+    def test_checkout_without_shipping_address_fails(self):
+        """Test that checkout requires all shipping fields."""
+        self.authenticate_as(self.buyer)
+        
+        # Add product to cart
+        self.client.post(
+            reverse('shopping:cart-item-list'),
+            {'product': str(self.product.id), 'quantity': 1},
+            format='json',
+        )
+        
+        # Attempt checkout without address
+        response = self.client.post(
+            reverse('shopping:checkout'),
+            {
+                'shipping_city': 'Nairobi',
+                'shipping_postal_code': '00100',
+                'shipping_country': 'Kenya',
+            },
+            format='json',
+        )
+        
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('shipping_address', response.data)
+
+    def test_unauthenticated_user_cannot_checkout(self):
+        """Test that unauthenticated users cannot checkout."""
+        response = self.client.post(
+            reverse('shopping:checkout'),
+            {
+                'shipping_address': '123 Main St',
+                'shipping_city': 'Nairobi',
+                'shipping_postal_code': '00100',
+                'shipping_country': 'Kenya',
+            },
+            format='json',
+        )
+        
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_retrieve_order_details(self):
+        """Test retrieving order details."""
+        self.authenticate_as(self.buyer)
+        
+        # Create an order
+        self.client.post(
+            reverse('shopping:cart-item-list'),
+            {'product': str(self.product.id), 'quantity': 2},
+            format='json',
+        )
+        
+        checkout_response = self.client.post(
+            reverse('shopping:checkout'),
+            {
+                'shipping_address': '123 Main St',
+                'shipping_city': 'Nairobi',
+                'shipping_postal_code': '00100',
+                'shipping_country': 'Kenya',
+            },
+            format='json',
+        )
+        
+        order_id = checkout_response.data['id']
+        
+        # Retrieve order details
+        response = self.client.get(reverse('shopping:order-detail', args=[order_id]))
+        
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['id'], order_id)
+        self.assertEqual(response.data['status'], 'pending')
+        self.assertEqual(len(response.data['items']), 1)
+
+    def test_list_buyer_orders(self):
+        """Test listing orders for authenticated buyer."""
+        self.authenticate_as(self.buyer)
+        
+        # Create multiple orders
+        for i in range(2):
+            self.client.post(
+                reverse('shopping:cart-item-list'),
+                {'product': str(self.product.id), 'quantity': 1},
+                format='json',
+            )
+            
+            self.client.post(
+                reverse('shopping:checkout'),
+                {
+                    'shipping_address': f'{i} Test St',
+                    'shipping_city': 'Nairobi',
+                    'shipping_postal_code': '00100',
+                    'shipping_country': 'Kenya',
+                },
+                format='json',
+            )
+        
+        # List orders
+        response = self.client.get(reverse('shopping:order-list'))
+        
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 2)
+
+    def test_buyer_cannot_see_other_buyers_orders(self):
+        """Test that buyers cannot view other buyers' orders."""
+        # Create order as first buyer
+        self.authenticate_as(self.buyer)
+        
+        self.client.post(
+            reverse('shopping:cart-item-list'),
+            {'product': str(self.product.id), 'quantity': 1},
+            format='json',
+        )
+        
+        checkout_response = self.client.post(
+            reverse('shopping:checkout'),
+            {
+                'shipping_address': '123 Main St',
+                'shipping_city': 'Nairobi',
+                'shipping_postal_code': '00100',
+                'shipping_country': 'Kenya',
+            },
+            format='json',
+        )
+        
+        order_id = checkout_response.data['id']
+        
+        # Switch to other buyer
+        self.authenticate_as(self.other_buyer)
+        
+        # Try to retrieve first buyer's order
+        response = self.client.get(reverse('shopping:order-detail', args=[order_id]))
+        
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_checkout_order_items_have_seller_info(self):
+        """Test that order items capture seller information."""
+        self.authenticate_as(self.buyer)
+        
+        # Add product to cart and checkout
+        self.client.post(
+            reverse('shopping:cart-item-list'),
+            {'product': str(self.product.id), 'quantity': 1},
+            format='json',
+        )
+        
+        checkout_response = self.client.post(
+            reverse('shopping:checkout'),
+            {
+                'shipping_address': '123 Main St',
+                'shipping_city': 'Nairobi',
+                'shipping_postal_code': '00100',
+                'shipping_country': 'Kenya',
+            },
+            format='json',
+        )
+        
+        # Verify order items include seller info
+        items = checkout_response.data['items']
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]['seller_id'], str(self.seller.id))
+        self.assertEqual(float(items[0]['price_at_purchase']), 1000.00)
