@@ -1,6 +1,6 @@
 .PHONY: help sync runserver makemigrations makemigrations-all migrate migrate-all createsuperuser shell test \
         docker-up docker-up-build docker-up-d docker-down docker-down-v docker-build docker-logs \
-        docker-migrate docker-makemigrations docker-createsuperuser docker-shell docker-db
+        docker-migrate docker-makemigrations docker-createsuperuser docker-shell docker-db docker-pgadmin
 
 help:
 	@echo "Available commands:"
@@ -23,10 +23,12 @@ help:
 	@echo "    make docker-build          - Build docker images"
 	@echo "    make docker-logs           - Follow live container logs"
 	@echo "    make docker-db             - Start only PostgreSQL database container"
+	@echo "    make docker-pgadmin        - Start PostgreSQL and pgAdmin containers"
 	@echo "    make docker-migrate        - Run migrations inside backend container"
 	@echo "    make docker-makemigrations - Make migrations inside backend container"
 	@echo "    make docker-createsuperuser- Create superuser inside backend container"
 	@echo "    make docker-shell          - Open Django shell inside backend container"
+
 
 # ==============================================================================
 # Local Development Commands (uv)
@@ -86,6 +88,10 @@ docker-logs:
 
 docker-db:
 	docker compose up -d db
+
+docker-pgadmin:
+	docker compose up -d db pgadmin
+
 
 docker-migrate:
 	docker compose exec backend python manage.py migrate
