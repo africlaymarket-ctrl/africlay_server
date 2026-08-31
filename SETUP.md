@@ -204,6 +204,22 @@ make runserver
 
 - **Django Server:** `http://localhost:8000/`
 - **Django Admin Interface:** `http://localhost:8000/admin/`
+- **pgAdmin 4 (Database GUI):** `http://localhost:5050/`
+  - **Login Email:** `admin@africlay.com` (or value of `PGADMIN_DEFAULT_EMAIL` in `.env`)
+  - **Login Password:** `admin` (or value of `PGADMIN_DEFAULT_PASSWORD` in `.env`)
+
+### Connecting pgAdmin to PostgreSQL Database
+Once logged into pgAdmin:
+1. Right-click **Servers** > **Register** > **Server...**
+2. In the **General** tab:
+   - **Name:** `Africlay DB` (or any name)
+3. In the **Connection** tab:
+   - **Host name/address:** `db` (the service name on the shared docker network)
+   - **Port:** `5432`
+   - **Maintenance database:** `africlay_db`
+   - **Username:** `africlay`
+   - **Password:** `africlay`
+4. Click **Save**.
 
 ---
 
@@ -225,10 +241,12 @@ make help
 | `make docker-build` | `docker compose build` | Rebuild container images |
 | `make docker-logs` | `docker compose logs -f` | Follow live container logs |
 | `make docker-db` | `docker compose up -d db` | Start only PostgreSQL container |
+| `make docker-pgadmin` | `docker compose up -d db pgadmin` | Start PostgreSQL and pgAdmin containers |
 | `make docker-migrate` | `docker compose exec backend python manage.py migrate` | Run migrations inside backend container |
 | `make docker-makemigrations` | `docker compose exec backend python manage.py makemigrations` | Generate migrations inside backend container |
 | `make docker-createsuperuser` | `docker compose exec backend python manage.py createsuperuser` | Create admin superuser in backend container |
 | `make docker-shell` | `docker compose exec backend python manage.py shell` | Open Django shell inside container |
+
 
 ### Local Development Commands (`uv`)
 | Make Target | Equivalent Local Command | Description |
