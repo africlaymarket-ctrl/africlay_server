@@ -1,3 +1,5 @@
+General shared functionalities
+
 - Email sending services
 - Uploading documents
 - SMS services
