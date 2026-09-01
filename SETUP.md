@@ -36,7 +36,18 @@ docker compose version
 
 ---
 
-## 2. Environment Configuration
+## 2. Environment Configuration & Multi-Environment Settings
+
+The application uses a modular settings architecture under `africlay_server/settings/`:
+- **`base.py`**: Common settings (apps, middleware, templates, rest framework, swagger, auth).
+- **`local.py`**: Local development using locally spun PostgreSQL container via Docker.
+- **`dev.py`**: Development environment connecting to a Google Cloud SQL PostgreSQL instance using its Public IP address.
+- **`prod.py`**: Production deployment with production database instance, debug disabled, and security hardening.
+
+Switch environments by setting `DEV_ENVIRONMENT` in your `.env` (or shell environment):
+- `DEV_ENVIRONMENT=local` (Default)
+- `DEV_ENVIRONMENT=dev`
+- `DEV_ENVIRONMENT=prod`
 
 1. Copy `.env-example` to create your local `.env` file:
    ```bash
@@ -45,24 +56,31 @@ docker compose version
 
 2. Review the `.env` settings:
    ```env
-   # Django Configuration
-   DEBUG=True
-   SECRET_KEY=django-insecure-9g1%r+q*=*6y0_q1*+@s_arj_viup-%vk-x%%_@@ef7ibz+!wv
-   ALLOWED_HOSTS=localhost,127.0.0.1,0.0.0.0,backend
+   # Environment Mode: 'local', 'dev', or 'prod'
+   DEV_ENVIRONMENT=local
 
-   # Database Configuration (PostgreSQL)
+   # Local PostgreSQL Configuration (Docker)
    DB_ENGINE=django.db.backends.postgresql
    DB_NAME=africlay_db
    DB_USER=africlay
    DB_PASSWORD=africlay
    DB_HOST=localhost
    DB_PORT=5432
+
+   # Cloud SQL Dev Configuration (Public IP)
+   DEV_DB_NAME=africlaydev
+   DEV_DB_USER=africlaydev
+   DEV_DB_PASSWORD=your_dev_password
+   DEV_DB_HOST=34.x.x.x
+   DEV_DB_PORT=5432
    ```
 
 > **Note:**
 > - `DB_HOST=localhost` in `.env` enables running commands locally on your Mac (e.g. `make migrate` / `make runserver`) while connecting to the exposed database port `5432`.
-> - Inside Docker, `docker-compose.yml` automatically overrides `DB_HOST` to `db` for container-to-container networking.
-> - If you wish to quickly test with SQLite locally without running PostgreSQL, set `DB_ENGINE=django.db.backends.sqlite3`.
+> - Inside Docker, `docker-compose.yml` automatically sets `DB_HOST=db` for container-to-container networking.
+> - When `DEV_ENVIRONMENT=dev`, the app automatically connects to `DEV_DB_HOST` (Cloud SQL Public IP).
+> - When `DEV_ENVIRONMENT=prod`, the app connects to `PROD_DB_HOST` with production security headers.
+
 
 ---
 
