@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from rest_framework import serializers
 
 from .models import Cart, CartItem, Order, OrderItem
@@ -45,6 +47,27 @@ class OrderDetailSerializer(serializers.ModelSerializer):
         model = Order
         fields = ['id', 'buyer_id', 'total_amount', 'currency', 'status', 'shipping_address', 'shipping_city', 'shipping_postal_code', 'shipping_country', 'items', 'created_at', 'updated_at']
         read_only_fields = fields
+
+
+class SellerOrderDetailSerializer(OrderDetailSerializer):
+    items = serializers.SerializerMethodField()
+    total_amount = serializers.SerializerMethodField()
+
+    def get_total_amount(self, order):
+        seller = self.context['request'].user
+        return sum(
+            (item.price_at_purchase * item.quantity for item in order.items.filter(seller=seller)),
+            Decimal('0.00'),
+        )
+
+    def get_items(self, order):
+        seller = self.context['request'].user
+        seller_items = order.items.filter(seller=seller).select_related('product', 'seller')
+        return OrderItemDetailSerializer(seller_items, many=True).data
+
+
+class SellerOrderStatusSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=['processing', 'shipped', 'delivered'])
 
 
 class CreateCheckoutSerializer(serializers.Serializer):

@@ -2,18 +2,26 @@ from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
 from django.db import transaction, IntegrityError
+from django.shortcuts import get_object_or_404
 from decimal import Decimal
 
-from authapp.permissions import IsAuthenticated
+from authapp.permissions import IsAuthenticated, IsBuyer, IsSeller, IsVerifiedUser
 from product_management.models import Product
 
 from .models import Cart, CartItem, Order, OrderItem, OrderStatus
-from .serializers import CartSerializer, CartItemSerializer, CreateCheckoutSerializer, OrderDetailSerializer
+from .serializers import (
+    CartSerializer,
+    CartItemSerializer,
+    CreateCheckoutSerializer,
+    OrderDetailSerializer,
+    SellerOrderDetailSerializer,
+    SellerOrderStatusSerializer,
+)
 
 
 class CartDetailView(generics.GenericAPIView):
     serializer_class = CartSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsBuyer]
 
     def get_object(self):
         cart, _ = Cart.objects.get_or_create(buyer=self.request.user)
@@ -27,7 +35,7 @@ class CartDetailView(generics.GenericAPIView):
 
 class CartItemListCreateView(generics.ListCreateAPIView):
     serializer_class = CartItemSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsBuyer]
 
     def get_queryset(self):
         cart, _ = Cart.objects.get_or_create(buyer=self.request.user)
@@ -41,6 +49,8 @@ class CartItemListCreateView(generics.ListCreateAPIView):
             quantity = int(request.data.get('quantity', 1))
         except (ValueError, TypeError):
             raise ValidationError({'quantity': 'Quantity must be an integer.'})
+        if quantity < 1:
+            raise ValidationError({'quantity': 'Quantity must be at least 1.'})
 
         try:
             product = Product.objects.get(id=product_id)
@@ -71,7 +81,7 @@ class CartItemListCreateView(generics.ListCreateAPIView):
 
 class CartItemDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = CartItemSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsBuyer]
     lookup_field = 'pk'
 
     def get_queryset(self):
@@ -90,7 +100,7 @@ class CartItemDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 class CheckoutView(generics.GenericAPIView):
     serializer_class = CreateCheckoutSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsBuyer]
 
     def post(self, request, *args, **kwargs):
         """Atomic checkout transaction: validate cart, lock stock, create order, clear cart."""
@@ -99,18 +109,18 @@ class CheckoutView(generics.GenericAPIView):
 
         buyer = request.user
 
-        try:
-            cart = Cart.objects.get(buyer=buyer)
-        except Cart.DoesNotExist:
-            raise ValidationError({'cart': 'Cart not found.'})
-
-        cart_items = list(CartItem.objects.filter(cart=cart).select_related('product'))
-        if not cart_items:
-            raise ValidationError({'cart': 'Cannot checkout with an empty cart.'})
-
         # Start atomic transaction
         try:
             with transaction.atomic():
+                try:
+                    cart = Cart.objects.select_for_update().get(buyer=buyer)
+                except Cart.DoesNotExist:
+                    raise ValidationError({'cart': 'Cart not found.'})
+
+                cart_items = list(CartItem.objects.filter(cart=cart).select_related('product'))
+                if not cart_items:
+                    raise ValidationError({'cart': 'Cannot checkout with an empty cart.'})
+
                 # Lock products for stock validation
                 product_ids = [item.product.id for item in cart_items]
                 products_locked = {
@@ -127,6 +137,8 @@ class CheckoutView(generics.GenericAPIView):
                         raise ValidationError({'product': f'{product.name} is not available for purchase.'})
                     if product.store.status != 'active':
                         raise ValidationError({'product': f'Store for {product.name} is not active.'})
+                    if product.currency != 'KES':
+                        raise ValidationError({'product': f'{product.name} uses an unsupported currency.'})
                     if product.stock_quantity < item.quantity:
                         raise ValidationError({'product': f'Insufficient stock for {product.name}. Only {product.stock_quantity} available.'})
 
@@ -190,3 +202,45 @@ class OrderListView(generics.ListAPIView):
 
     def get_queryset(self):
         return Order.objects.filter(buyer=self.request.user).prefetch_related('items').order_by('-created_at')
+
+
+class SellerOrderListView(generics.ListAPIView):
+    serializer_class = SellerOrderDetailSerializer
+    permission_classes = [IsSeller, IsVerifiedUser]
+
+    def get_queryset(self):
+        return Order.objects.filter(items__seller=self.request.user).distinct().prefetch_related('items').order_by('-created_at')
+
+
+class SellerOrderDetailView(generics.RetrieveAPIView):
+    serializer_class = SellerOrderDetailSerializer
+    permission_classes = [IsSeller, IsVerifiedUser]
+    lookup_field = 'pk'
+
+    def get_queryset(self):
+        return Order.objects.filter(items__seller=self.request.user).distinct().prefetch_related('items')
+
+
+class SellerOrderStatusView(generics.GenericAPIView):
+    serializer_class = SellerOrderStatusSerializer
+    permission_classes = [IsSeller, IsVerifiedUser]
+
+    def get_queryset(self):
+        return Order.objects.filter(items__seller=self.request.user).distinct()
+
+    def patch(self, request, *args, **kwargs):
+        order = get_object_or_404(self.get_queryset(), pk=kwargs['pk'])
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        new_status = serializer.validated_data['status']
+        if order.items.exclude(seller=request.user).exists():
+            raise ValidationError({'status': 'Mixed-seller orders require coordinated fulfillment.'})
+        allowed_transitions = {
+            OrderStatus.PROCESSING: [OrderStatus.SHIPPED],
+            OrderStatus.SHIPPED: [OrderStatus.DELIVERED],
+        }
+        if new_status not in allowed_transitions.get(order.status, []):
+            raise ValidationError({'status': f'Cannot move order from {order.status} to {new_status}.'})
+        order.status = new_status
+        order.save(update_fields=['status', 'updated_at'])
+        return Response(SellerOrderDetailSerializer(order, context={'request': request}).data)

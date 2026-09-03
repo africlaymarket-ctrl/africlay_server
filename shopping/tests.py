@@ -8,6 +8,7 @@ from decimal import Decimal
 from authapp.models import UserRole
 from authapp.utils import generate_access_token
 from product_management.models import Product
+from shopping.models import Order, OrderStatus
 from store_management.models import Store
 
 
@@ -565,3 +566,90 @@ class CheckoutApiTests(TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]['seller_id'], str(self.seller.id))
         self.assertEqual(float(items[0]['price_at_purchase']), 1000.00)
+
+
+class SellerOrderApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.buyer = User.objects.create_user(
+            email='buyer@example.com', password='StrongPassword123!',
+            role=UserRole.BUYER, is_verified=True,
+        )
+        self.seller = User.objects.create_user(
+            email='seller@example.com', password='StrongPassword123!',
+            role=UserRole.SELLER, is_verified=True,
+        )
+        self.other_seller = User.objects.create_user(
+            email='other-seller@example.com', password='StrongPassword123!',
+            role=UserRole.SELLER, is_verified=True,
+        )
+        self.store = Store.objects.create(owner=self.seller, name='Seller Store', slug='seller-store')
+        self.other_store = Store.objects.create(owner=self.other_seller, name='Other Store', slug='other-store')
+
+        self.product = Product.objects.create(
+            store=self.store, name='Seller Product', slug='seller-product', sku='SELLER-001',
+            price='100.00', stock_quantity=10, status='published',
+        )
+        self.other_product = Product.objects.create(
+            store=self.other_store, name='Other Product', slug='other-product', sku='OTHER-001',
+            price='50.00', stock_quantity=10, status='published',
+        )
+
+    def authenticate_as(self, user):
+        token = generate_access_token(user)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+
+    def create_order(self):
+        self.authenticate_as(self.buyer)
+        self.client.post(
+            reverse('shopping:cart-item-list'),
+            {'product': str(self.product.id), 'quantity': 2}, format='json',
+        )
+        self.client.post(
+            reverse('shopping:checkout'),
+            {
+                'shipping_address': '123 Main St', 'shipping_city': 'Nairobi',
+                'shipping_postal_code': '00100', 'shipping_country': 'Kenya',
+            }, format='json',
+        )
+        return self.client.get(reverse('shopping:order-list')).data[0]['id']
+
+    def test_seller_can_list_orders_containing_their_products(self):
+        order_id = self.create_order()
+        self.authenticate_as(self.seller)
+
+        response = self.client.get(reverse('shopping:seller-order-list'))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([order['id'] for order in response.data], [order_id])
+        self.assertEqual(len(response.data[0]['items']), 1)
+
+    def test_seller_cannot_view_orders_without_their_products(self):
+        order_id = self.create_order()
+        self.authenticate_as(self.other_seller)
+
+        list_response = self.client.get(reverse('shopping:seller-order-list'))
+        detail_response = self.client.get(reverse('shopping:seller-order-detail', args=[order_id]))
+
+        self.assertEqual(list_response.data, [])
+        self.assertEqual(detail_response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_seller_can_advance_order_status(self):
+        order_id = self.create_order()
+        self.authenticate_as(self.seller)
+
+        response = self.client.patch(
+            reverse('shopping:seller-order-status', args=[order_id]),
+            {'status': 'shipped'}, format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        Order.objects.filter(id=order_id).update(status=OrderStatus.PROCESSING)
+        response = self.client.patch(
+            reverse('shopping:seller-order-status', args=[order_id]),
+            {'status': 'shipped'}, format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], 'shipped')
