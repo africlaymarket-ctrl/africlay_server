@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -45,6 +46,7 @@ INSTALLED_APPS = [
     'rest_framework',
     # core apps
     'authapp',
+    'core',
     'store_management',
     'product_management',
     'shopping',
@@ -121,7 +123,21 @@ WSGI_APPLICATION = 'africlay_server.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
-DB_ENGINE = os.getenv('DB_ENGINE', 'django.db.backends.postgresql')
+DB_ENGINE = os.getenv('DB_ENGINE')
+
+if not DB_ENGINE:
+    if DEBUG:
+        DB_ENGINE = 'django.db.backends.sqlite3'
+    else:
+        raise ImproperlyConfigured('DB_ENGINE must be configured when DEBUG is disabled.')
+
+SUPPORTED_DB_ENGINES = {
+    'django.db.backends.sqlite3',
+    'django.db.backends.postgresql',
+}
+
+if DB_ENGINE not in SUPPORTED_DB_ENGINES:
+    raise ImproperlyConfigured(f'Unsupported DB_ENGINE: {DB_ENGINE}')
 
 if DB_ENGINE == 'django.db.backends.sqlite3':
     DATABASES = {
