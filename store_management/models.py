@@ -2,13 +2,15 @@ from django.db import models
 from django.conf import settings
 import uuid
 
+from core.models import TimestampedModel
+
 
 class StoreStatus(models.TextChoices):
 	ACTIVE = 'active', 'Active'
 	SUSPENDED = 'suspended', 'Suspended'
 
 
-class Store(models.Model):
+class Store(TimestampedModel):
 	id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 	owner = models.OneToOneField(
 		settings.AUTH_USER_MODEL,
@@ -23,8 +25,6 @@ class Store(models.Model):
 		choices=StoreStatus.choices,
 		default=StoreStatus.ACTIVE,
 	)
-	created_at = models.DateTimeField(auto_now_add=True)
-	updated_at = models.DateTimeField(auto_now=True)
 
 	class Meta:
 		ordering = ['name']

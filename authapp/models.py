@@ -3,6 +3,8 @@ from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
 from django.utils import timezone
 
+from core.models import TimestampedModel
+
 
 class UserRole(models.TextChoices):
     BUYER = 'buyer', 'Buyer'
@@ -44,7 +46,7 @@ class CustomUserManager(BaseUserManager):
         return self.create_user(email, password, **extra_fields)
 
 
-class User(AbstractBaseUser, PermissionsMixin):
+class User(TimestampedModel, AbstractBaseUser, PermissionsMixin):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     email = models.EmailField(unique=True, db_index=True, max_length=255)
     phone_number = models.CharField(max_length=20, blank=True, null=True, unique=True)
@@ -55,7 +57,6 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_staff = models.BooleanField(default=False)
 
     date_joined = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
     last_login = models.DateTimeField(blank=True, null=True)
 
     objects = CustomUserManager()
@@ -91,7 +92,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         return self.role in [UserRole.ADMIN, UserRole.SUPER_ADMIN] or self.is_staff or self.is_superuser
 
 
-class UserProfile(models.Model):
+class UserProfile(TimestampedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
     first_name = models.CharField(max_length=150, blank=True, default='')
@@ -100,8 +101,6 @@ class UserProfile(models.Model):
     avatar_url = models.URLField(blank=True, null=True)
     bio = models.TextField(blank=True, null=True)
     notification_preferences = models.JSONField(default=dict, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = 'User Profile'
@@ -117,7 +116,7 @@ class AddressType(models.TextChoices):
     BOTH = 'both', 'Both'
 
 
-class UserAddress(models.Model):
+class UserAddress(TimestampedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='addresses')
     address_type = models.CharField(max_length=20, choices=AddressType.choices, default=AddressType.SHIPPING)
@@ -131,8 +130,6 @@ class UserAddress(models.Model):
     country = models.CharField(max_length=100)
     country_code = models.CharField(max_length=10, blank=True, null=True)
     is_default = models.BooleanField(default=False)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = 'User Address'
@@ -154,12 +151,11 @@ class OTPType(models.TextChoices):
     PASSWORD_RESET = 'password_reset', 'Password Reset'
 
 
-class OTPVerification(models.Model):
+class OTPVerification(TimestampedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='otp_codes')
     otp_code = models.CharField(max_length=6)
     otp_type = models.CharField(max_length=30, choices=OTPType.choices)
-    created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField()
     is_used = models.BooleanField(default=False)
 
@@ -175,7 +171,7 @@ class OTPVerification(models.Model):
         return not self.is_used and timezone.now() <= self.expires_at
 
 
-class BlacklistedToken(models.Model):
+class BlacklistedToken(TimestampedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     token_id = models.CharField(max_length=255, unique=True, db_index=True)
     user = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True, related_name='blacklisted_tokens')

@@ -4,6 +4,8 @@ import uuid
 from django.core.validators import MinValueValidator
 from django.db import models
 
+from core.models import TimestampedModel
+
 
 class ProductStatus(models.TextChoices):
 	DRAFT = 'draft', 'Draft'
@@ -11,7 +13,7 @@ class ProductStatus(models.TextChoices):
 	ARCHIVED = 'archived', 'Archived'
 
 
-class Product(models.Model):
+class Product(TimestampedModel):
 	id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 	store = models.ForeignKey('store_management.Store', on_delete=models.CASCADE, related_name='products')
 	name = models.CharField(max_length=180)
@@ -22,8 +24,6 @@ class Product(models.Model):
 	currency = models.CharField(max_length=3, default='KES')
 	stock_quantity = models.PositiveIntegerField(default=0)
 	status = models.CharField(max_length=20, choices=ProductStatus.choices, default=ProductStatus.DRAFT)
-	created_at = models.DateTimeField(auto_now_add=True)
-	updated_at = models.DateTimeField(auto_now=True)
 
 	class Meta:
 		ordering = ['-created_at']
