@@ -177,6 +177,18 @@ class SendSMSViewAPITests(TestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_api_validation_rejects_both_phone_fields(self):
+        response = self.client.post(
+            self.url,
+            data={
+                "phone_number": "0712345678",
+                "phone_numbers": ["0712345678"],
+                "message": "Ambiguous recipient input",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
     def test_api_validation_missing_message(self):
         response = self.client.post(
             self.url,

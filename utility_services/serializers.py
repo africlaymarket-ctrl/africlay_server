@@ -23,10 +23,19 @@ class SendSMSSerializer(serializers.Serializer):
         phone_numbers = attrs.get('phone_numbers')
         phone_number = attrs.get('phone_number')
 
-        if not phone_numbers and not phone_number:
+        has_phone_numbers = bool(phone_numbers)
+        has_phone_number = bool(phone_number)
+
+        if has_phone_numbers and has_phone_number:
+            raise serializers.ValidationError(
+                "Provide either 'phone_number' or 'phone_numbers', but not both."
+            )
+
+        if not has_phone_numbers and not has_phone_number:
             raise serializers.ValidationError(
                 "Either 'phone_number' (string) or 'phone_numbers' (list) must be provided."
             )
+
         return attrs
 
 
