@@ -1,5 +1,7 @@
 from rest_framework.permissions import BasePermission
 
+from .models import UserRole
+
 
 class IsAuthenticated(BasePermission):
     """Allows access only to authenticated users."""
@@ -53,6 +55,18 @@ class IsAdminRole(BasePermission):
             and request.user.is_authenticated
             and request.user.is_active
             and request.user.is_admin_role
+        )
+
+
+class IsKYCReviewer(BasePermission):
+    """Allows only explicitly assigned application admin roles to review KYC."""
+
+    def has_permission(self, request, view):
+        return bool(
+            request.user
+            and request.user.is_authenticated
+            and request.user.is_active
+            and request.user.role in [UserRole.ADMIN, UserRole.SUPER_ADMIN]
         )
 
 
