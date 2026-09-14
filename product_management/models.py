@@ -88,21 +88,3 @@ class ProductImage(TimestampedModel):
     def __str__(self):
         return f'Image for {self.product.name}'
 
-
-class ProductVariant(TimestampedModel):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='variants')
-    name = models.CharField(max_length=100)
-    sku_suffix = models.CharField(max_length=40)
-    attributes = models.JSONField(default=dict, blank=True)
-    price_modifier = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    stock_quantity = models.PositiveIntegerField(default=0)
-    is_active = models.BooleanField(default=True)
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=['product', 'sku_suffix'], name='unique_variant_sku_suffix_per_product'),
-        ]
-
-    def __str__(self):
-        return f'{self.product.name} — {self.name}'

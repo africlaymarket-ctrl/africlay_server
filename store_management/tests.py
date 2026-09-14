@@ -1,5 +1,6 @@
 from django.urls import reverse
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.files.storage import default_storage
 from rest_framework import status
 from rest_framework.test import APIClient
 from django.contrib.auth import get_user_model
@@ -237,6 +238,27 @@ class StoreApiTests(TestCase):
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
 		self.assertEqual(response.data['status'], StoreKYCStatus.PENDING)
 		self.assertEqual(response.data['business_name'], 'Updated Studio Ltd')
+
+	def test_seller_can_replace_document_when_resubmitting_rejected_kyc(self):
+		store = self.create_store()
+		url = reverse('store_management:store-kyc-submit', kwargs={'slug': store['slug']})
+		initial_response = self.client.post(url, self.kyc_payload(), format='multipart')
+		admin = User.objects.create_superuser(email='admin@example.com', password='AdminPassword123!')
+		self.authenticate_as(admin)
+		self.client.post(
+			reverse('store_management:store-kyc-review', kwargs={'slug': store['slug']}),
+			{'decision': 'rejected', 'rejection_reason': 'Document needs correction.'}, format='json',
+		)
+
+		self.authenticate_as(self.seller)
+		old_document_name = StoreKYC.objects.get(store_id=store['id']).document.name
+		replacement = self.kyc_payload('Updated Studio Ltd')
+		replacement['document'] = SimpleUploadedFile('replacement.pdf', b'%PDF-1.4 replacement', content_type='application/pdf')
+		response = self.client.post(url, replacement, format='multipart')
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertNotEqual(response.data['document'], initial_response.data['document'])
+		self.assertFalse(default_storage.exists(old_document_name))
 
 	def test_non_admin_cannot_review_kyc(self):
 		store = self.create_store()

@@ -10,6 +10,7 @@ from authapp.models import UserRole
 from authapp.utils import generate_access_token
 from product_management.models import Tag
 from store_management.models import Store, StoreKYC, StoreKYCStatus
+from .models import Service
 
 
 User = get_user_model()
@@ -91,3 +92,30 @@ class ServiceApiTests(TestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertIn('services/', response.data['image'])
+
+    def test_seller_can_delete_owned_service(self):
+        self.authenticate_as(self.seller)
+        service_response = self.client.post(
+            reverse('service_management:service-manage-list'), self.service_data, format='json',
+        )
+
+        response = self.client.delete(
+            reverse('service_management:service-manage-detail', kwargs={'pk': service_response.data['id']}),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+
+    def test_seller_cannot_delete_another_sellers_service(self):
+        other_seller = User.objects.create_user(
+            email='other@example.com', password='StrongPassword123!',
+            role=UserRole.SELLER, is_verified=True,
+        )
+        other_store = Store.objects.create(owner=other_seller, name='Mombasa Ceramics', slug='mombasa-ceramics')
+        service = Service.objects.create(store=other_store, **self.service_data)
+        self.authenticate_as(self.seller)
+
+        response = self.client.delete(
+            reverse('service_management:service-manage-detail', kwargs={'pk': service.id}),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)

@@ -11,7 +11,7 @@ from django.utils import timezone
 from authapp.models import UserRole
 from authapp.utils import generate_access_token
 from store_management.models import Store, StoreKYC, StoreKYCStatus
-from .models import Category, Tag
+from .models import Category, Product, Tag
 
 
 User = get_user_model()
@@ -119,6 +119,31 @@ class ProductApiTests(TestCase):
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
 		self.assertEqual(len(response.data), 1)
 		self.assertEqual(response.data[0]['slug'], create_response.data['slug'])
+
+	def test_public_catalogue_filters_by_category_and_tag_slug(self):
+		self.approve_store_kyc()
+		category = Category.objects.create(name='Ceramics', slug='ceramics')
+		tag = Tag.objects.create(name='Handmade', slug='handmade')
+		other_tag = Tag.objects.create(name='Decor', slug='decor')
+		self.authenticate_as(self.seller)
+		matching = self.client.post(
+			reverse('product_management:product-manage-list'),
+			{**self.product_data, 'status': 'published', 'category': str(category.id), 'tags': [str(tag.id)]},
+			format='json',
+		)
+		other = self.client.post(
+			reverse('product_management:product-manage-list'),
+			{**self.product_data, 'name': 'Decor Bowl', 'slug': 'decor-bowl', 'sku': 'BOWL-001', 'status': 'published', 'category': str(category.id), 'tags': [str(other_tag.id)]},
+			format='json',
+		)
+		self.assertEqual(matching.status_code, status.HTTP_201_CREATED)
+		self.assertEqual(other.status_code, status.HTTP_201_CREATED)
+
+		self.client.credentials()
+		response = self.client.get(reverse('product_management:product-list'), {'category': 'ceramics', 'tag': 'handmade'})
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual([item['slug'] for item in response.data], ['hand-thrown-mug'])
 
 	def test_public_catalogue_can_retrieve_product_by_slug(self):
 		self.approve_store_kyc()

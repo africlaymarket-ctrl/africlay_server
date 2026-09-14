@@ -1,3 +1,5 @@
+from django.core.files.uploadedfile import UploadedFile
+from django.db.models.fields.files import FieldFile
 from rest_framework import serializers
 
 from .models import Store, StoreKYC, StoreKYCDocumentType, StoreKYCStatus
@@ -74,9 +76,23 @@ class StoreKYCSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         existing_document = getattr(self.instance, 'document', None)
         document = attrs.get('document', existing_document)
-        document_type = attrs.get('document_type', getattr(self.instance, 'document_type', ''))
-        if not document:
+
+        if not attrs.get('document') and existing_document and self.instance and self.instance.status == StoreKYCStatus.REJECTED:
+            document = existing_document
+            attrs['document'] = document
+
+        if existing_document and (
+            document is None
+            or isinstance(document, str)
+            or not isinstance(document, (UploadedFile, FieldFile))
+        ):
+            document = existing_document
+            attrs['document'] = document
+
+        if not document and not existing_document:
             raise serializers.ValidationError({'document': 'A verification document is required.'})
+
+        document_type = attrs.get('document_type', getattr(self.instance, 'document_type', ''))
         if not document_type:
             raise serializers.ValidationError({'document_type': 'Document type is required.'})
         return attrs

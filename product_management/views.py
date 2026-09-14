@@ -7,8 +7,8 @@ from authapp.permissions import IsAdminRole, IsSeller, IsVerifiedUser
 from core.services import require_approved_kyc_for_publication
 from store_management.models import Store, StoreKYCStatus, StoreStatus
 
-from .models import Category, Product, ProductImage, ProductStatus, ProductVariant, Tag
-from .serializers import CategorySerializer, ProductImageSerializer, ProductSerializer, ProductVariantSerializer, TagSerializer
+from .models import Category, Product, ProductImage, ProductStatus, Tag
+from .serializers import CategorySerializer, ProductImageSerializer, ProductSerializer, TagSerializer
 
 
 class CategoryListCreateView(generics.ListCreateAPIView):
@@ -48,11 +48,19 @@ class ProductListView(generics.ListAPIView):
     permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
-        return Product.objects.filter(
+        queryset = Product.objects.filter(
             status=ProductStatus.PUBLISHED,
             store__status=StoreStatus.ACTIVE,
             store__kyc__status=StoreKYCStatus.APPROVED,
-        ).select_related('store', 'category').prefetch_related('tags', 'images', 'variants')
+        ).select_related('store', 'category').prefetch_related('tags', 'images')
+
+        category_slug = self.request.query_params.get('category')
+        tag_slug = self.request.query_params.get('tag')
+        if category_slug:
+            queryset = queryset.filter(category__slug=category_slug)
+        if tag_slug:
+            queryset = queryset.filter(tags__slug=tag_slug)
+        return queryset.distinct()
 
 
 class ProductManageListCreateView(generics.ListCreateAPIView):
@@ -60,7 +68,7 @@ class ProductManageListCreateView(generics.ListCreateAPIView):
     permission_classes = [IsSeller, IsVerifiedUser]
 
     def get_queryset(self):
-        return Product.objects.filter(store__owner=self.request.user).select_related('store', 'category').prefetch_related('tags', 'images', 'variants')
+        return Product.objects.filter(store__owner=self.request.user).select_related('store', 'category').prefetch_related('tags', 'images')
 
     def perform_create(self, serializer):
         try:
@@ -80,7 +88,7 @@ class ProductDetailView(generics.RetrieveUpdateAPIView):
     lookup_field = 'pk'
 
     def get_queryset(self):
-        products = Product.objects.select_related('store', 'category').prefetch_related('tags', 'images', 'variants')
+        products = Product.objects.select_related('store', 'category').prefetch_related('tags', 'images')
         if self.kwargs.get('slug'):
             return products.filter(status=ProductStatus.PUBLISHED, store__status=StoreStatus.ACTIVE, store__kyc__status=StoreKYCStatus.APPROVED)
         if self.request.user.is_admin_role:
@@ -129,14 +137,3 @@ class ProductImageListCreateView(generics.ListCreateAPIView):
         product = get_object_or_404(Product, pk=self.kwargs['pk'], store__owner=self.request.user)
         serializer.save(product=product)
 
-
-class ProductVariantListCreateView(generics.ListCreateAPIView):
-    serializer_class = ProductVariantSerializer
-    permission_classes = [IsSeller, IsVerifiedUser]
-
-    def get_queryset(self):
-        return ProductVariant.objects.filter(product_id=self.kwargs['pk'], product__store__owner=self.request.user)
-
-    def perform_create(self, serializer):
-        product = get_object_or_404(Product, pk=self.kwargs['pk'], store__owner=self.request.user)
-        serializer.save(product=product)

@@ -32,11 +32,15 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'corsheaders',
+    'storages',
     'rest_framework',
     # Core apps
+    'core',
     'authapp',
     'store_management',
     'product_management',
+    'service_management',
     'shopping',
     'utility_services',
     # API Documentation (Swagger / OpenAPI)
@@ -46,6 +50,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -72,6 +77,21 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'africlay_server.wsgi.application'
+
+# CORS / frontend dev connectivity
+CORS_ALLOWED_ORIGINS = [
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+]
+CORS_ALLOW_CREDENTIALS = True
+CSRF_TRUSTED_ORIGINS = [
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+]
 
 # Django REST Framework
 REST_FRAMEWORK = {
@@ -136,6 +156,25 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 # Media files
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+
+# Google Cloud Storage is opt-in locally and mandatory in deployed environments.
+# Files are private and served through signed URLs when GCS is enabled.
+GS_BUCKET_NAME = os.getenv('GS_BUCKET_NAME', '')
+GS_PROJECT_ID = os.getenv('GS_PROJECT_ID', '')
+GS_CREDENTIALS_FILE = os.getenv('GS_CREDENTIALS_FILE', '')
+GS_CREDENTIALS = None
+GS_DEFAULT_ACL = None
+GS_QUERYSTRING_AUTH = True
+GS_FILE_OVERWRITE = False
+
+if GS_BUCKET_NAME:
+    if GS_CREDENTIALS_FILE:
+        from google.oauth2 import service_account
+        GS_CREDENTIALS = service_account.Credentials.from_service_account_file(GS_CREDENTIALS_FILE)
+    STORAGES = {
+        'default': {'BACKEND': 'storages.backends.gcloud.GoogleCloudStorage'},
+        'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+    }
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

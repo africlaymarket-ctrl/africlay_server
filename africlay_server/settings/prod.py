@@ -12,8 +12,8 @@ from .base import *
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = False
 
-if not GCS_BUCKET_NAME:
-    raise ImproperlyConfigured('GCS_BUCKET_NAME must be configured in production.')
+if not GS_BUCKET_NAME:
+    raise ImproperlyConfigured('GS_BUCKET_NAME must be configured in production.')
 
 ALLOWED_HOSTS = [
     host.strip()

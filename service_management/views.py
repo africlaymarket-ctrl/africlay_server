@@ -58,7 +58,7 @@ class ServiceManageListCreateView(generics.ListCreateAPIView):
             raise ValidationError({'service': 'A service with this slug already exists.'}) from error
 
 
-class ServiceDetailView(generics.RetrieveUpdateAPIView):
+class ServiceDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = ServiceSerializer
     lookup_field = 'pk'
 
@@ -87,6 +87,11 @@ class ServiceDetailView(generics.RetrieveUpdateAPIView):
             ServiceStatus.PUBLISHED,
         )
         serializer.save()
+
+    def perform_destroy(self, instance):
+        for image in instance.images.all():
+            image.image.delete(save=False)
+        instance.delete()
 
 
 class ServiceImageListCreateView(generics.ListCreateAPIView):
