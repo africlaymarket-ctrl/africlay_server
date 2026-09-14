@@ -7,7 +7,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 
 from authapp.models import UserRole
-from authapp.utils import generate_access_token
+from core.test_utils import authenticate_client, create_verified_user
 from .models import StoreKYC, StoreKYCStatus
 
 
@@ -22,16 +22,10 @@ class StoreApiTests(TestCase):
 			'slug': 'nairobi-clay-studio',
 			'description': 'Handmade ceramic pieces from Nairobi.',
 		}
-		self.seller = User.objects.create_user(
-			email='seller@example.com',
-			password='StrongPassword123!',
-			role=UserRole.SELLER,
-			is_verified=True,
-		)
+		self.seller = create_verified_user(UserRole.SELLER, 'store-seller')
 
 	def authenticate_as(self, user):
-		token = generate_access_token(user)
-		self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+		authenticate_client(self.client, user)
 
 	def test_verified_seller_can_create_store(self):
 		self.authenticate_as(self.seller)

@@ -10,6 +10,7 @@ from django.utils import timezone
 
 from authapp.models import UserRole
 from authapp.utils import generate_access_token
+from core.test_utils import approve_store_kyc, create_store, create_verified_user, authenticate_client
 from store_management.models import Store, StoreKYC, StoreKYCStatus
 from .models import Category, Product, Tag
 
@@ -20,28 +21,10 @@ User = get_user_model()
 class ProductApiTests(TestCase):
 	def setUp(self):
 		self.client = APIClient()
-		self.seller = User.objects.create_user(
-			email='seller@example.com',
-			password='StrongPassword123!',
-			role=UserRole.SELLER,
-			is_verified=True,
-		)
-		self.other_seller = User.objects.create_user(
-			email='other@example.com',
-			password='StrongPassword123!',
-			role=UserRole.SELLER,
-			is_verified=True,
-		)
-		self.store = Store.objects.create(
-			owner=self.seller,
-			name='Nairobi Clay Studio',
-			slug='nairobi-clay-studio',
-		)
-		self.other_store = Store.objects.create(
-			owner=self.other_seller,
-			name='Mombasa Ceramics',
-			slug='mombasa-ceramics',
-		)
+		self.seller = create_verified_user(UserRole.SELLER, 'product-seller')
+		self.other_seller = create_verified_user(UserRole.SELLER, 'product-other-seller')
+		self.store = create_store(self.seller, 'Nairobi Clay Studio')
+		self.other_store = create_store(self.other_seller, 'Mombasa Ceramics')
 		self.product_data = {
 			'name': 'Hand-thrown Mug',
 			'slug': 'hand-thrown-mug',
@@ -53,16 +36,10 @@ class ProductApiTests(TestCase):
 		}
 
 	def authenticate_as(self, user):
-		token = generate_access_token(user)
-		self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+		authenticate_client(self.client, user)
 
 	def approve_store_kyc(self, store=None):
-		StoreKYC.objects.create(
-			store=store or self.store, business_name='Nairobi Clay Studio Ltd',
-			business_registration_number='BRN-001', tax_identification_number='TAX-001',
-			document_type='business_registration', document='kyc/test.pdf',
-			status=StoreKYCStatus.APPROVED, submitted_at=timezone.now(), reviewed_at=timezone.now(),
-		)
+		approve_store_kyc(store or self.store)
 
 	def test_verified_seller_can_create_product_for_owned_store(self):
 		self.authenticate_as(self.seller)

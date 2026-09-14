@@ -7,7 +7,7 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from authapp.models import UserRole
-from authapp.utils import generate_access_token
+from core.test_utils import authenticate_client, create_store, create_verified_user
 from product_management.models import Tag
 from store_management.models import Store, StoreKYC, StoreKYCStatus
 from .models import Service
@@ -19,18 +19,15 @@ User = get_user_model()
 class ServiceApiTests(TestCase):
     def setUp(self):
         self.client = APIClient()
-        self.seller = User.objects.create_user(
-            email='seller@example.com', password='StrongPassword123!',
-            role=UserRole.SELLER, is_verified=True,
-        )
-        self.store = Store.objects.create(owner=self.seller, name='Nairobi Clay Studio', slug='nairobi-clay-studio')
+        self.seller = create_verified_user(UserRole.SELLER, 'service-seller')
+        self.store = create_store(self.seller, 'Nairobi Clay Studio')
         self.service_data = {
             'name': 'Pottery workshop', 'slug': 'pottery-workshop', 'price': '2500.00',
             'currency': 'KES', 'duration_minutes': 120,
         }
 
     def authenticate_as(self, user):
-        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {generate_access_token(user)}')
+        authenticate_client(self.client, user)
 
     def test_admin_creates_service_category_and_seller_creates_tagged_service(self):
         admin = User.objects.create_superuser(email='admin@example.com', password='AdminPassword123!')

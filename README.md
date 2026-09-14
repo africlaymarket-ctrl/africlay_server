@@ -16,3 +16,15 @@ After configuring credentials, verify the bucket connection with:
 ```powershell
 ./.venv/Scripts/python.exe manage.py verify_gcs
 ```
+
+## Persistent API smoke test
+
+Run the core endpoint workflow against the configured database with:
+
+```powershell
+./.venv/Scripts/python.exe manage.py smoke_api
+```
+
+This creates uniquely named smoke records through the store, KYC, product,
+and service endpoints so the results can be inspected in the persistent
+database. Use a development database for this command.
