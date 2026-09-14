@@ -2,7 +2,10 @@ from django.db import models
 from django.conf import settings
 import uuid
 
-from core.models import TimestampedModel
+from core.models import (
+	TimestampedModel, kyc_document_upload_path, store_banner_upload_path,
+	store_logo_upload_path, validate_document_upload, validate_image_upload,
+)
 
 
 class StoreStatus(models.TextChoices):
@@ -14,6 +17,13 @@ class StoreKYCStatus(models.TextChoices):
 	PENDING = 'pending', 'Pending'
 	APPROVED = 'approved', 'Approved'
 	REJECTED = 'rejected', 'Rejected'
+
+
+class StoreKYCDocumentType(models.TextChoices):
+	NATIONAL_ID = 'national_id', 'National ID'
+	BUSINESS_REGISTRATION = 'business_registration', 'Business Registration'
+	TAX_CERTIFICATE = 'tax_certificate', 'Tax Certificate'
+	PASSPORT = 'passport', 'Passport'
 
 
 class Store(TimestampedModel):
@@ -33,6 +43,12 @@ class Store(TimestampedModel):
 	city = models.CharField(max_length=100, blank=True, default='')
 	country = models.CharField(max_length=100, blank=True, default='')
 	country_code = models.CharField(max_length=2, blank=True, default='')
+	logo = models.ImageField(upload_to=store_logo_upload_path, blank=True, null=True, validators=[validate_image_upload])
+	banner = models.ImageField(upload_to=store_banner_upload_path, blank=True, null=True, validators=[validate_image_upload])
+	average_rating = models.DecimalField(max_digits=3, decimal_places=2, default=0)
+	total_reviews = models.PositiveIntegerField(default=0)
+	total_orders = models.PositiveIntegerField(default=0)
+	total_products = models.PositiveIntegerField(default=0)
 	status = models.CharField(
 		max_length=20,
 		choices=StoreStatus.choices,
@@ -48,12 +64,18 @@ class Store(TimestampedModel):
 	def __str__(self):
 		return self.name
 
+	@property
+	def is_kyc_approved(self):
+		return getattr(self, 'kyc', None) and self.kyc.status == StoreKYCStatus.APPROVED
+
 
 class StoreKYC(TimestampedModel):
 	store = models.OneToOneField(Store, on_delete=models.CASCADE, related_name='kyc')
 	business_name = models.CharField(max_length=200)
 	business_registration_number = models.CharField(max_length=100)
 	tax_identification_number = models.CharField(max_length=100)
+	document_type = models.CharField(max_length=50, choices=StoreKYCDocumentType.choices, blank=True, default='')
+	document = models.FileField(upload_to=kyc_document_upload_path, blank=True, null=True, validators=[validate_document_upload])
 	status = models.CharField(
 		max_length=20,
 		choices=StoreKYCStatus.choices,

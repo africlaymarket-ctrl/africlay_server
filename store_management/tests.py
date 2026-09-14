@@ -1,4 +1,5 @@
 from django.urls import reverse
+from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework import status
 from rest_framework.test import APIClient
 from django.contrib.auth import get_user_model
@@ -137,16 +138,21 @@ class StoreApiTests(TestCase):
 		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 		return response.data
 
+	def kyc_payload(self, business_name='Nairobi Clay Studio Ltd'):
+		return {
+			'business_name': business_name,
+			'business_registration_number': 'BRN-001',
+			'tax_identification_number': 'TAX-001',
+			'document_type': 'business_registration',
+			'document': SimpleUploadedFile('registration.pdf', b'%PDF-1.4 test document', content_type='application/pdf'),
+		}
+
 	def test_seller_can_submit_store_kyc(self):
 		store = self.create_store()
 		response = self.client.post(
 			reverse('store_management:store-kyc-submit', kwargs={'slug': store['slug']}),
-			{
-				'business_name': 'Nairobi Clay Studio Ltd',
-				'business_registration_number': 'BRN-001',
-				'tax_identification_number': 'TAX-001',
-			},
-			format='json',
+			self.kyc_payload(),
+			format='multipart',
 		)
 
 		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -154,16 +160,23 @@ class StoreApiTests(TestCase):
 		self.assertEqual(response.data['store'], store['id'])
 		self.assertIsNotNone(response.data['submitted_at'])
 
+	def test_seller_can_attach_kyc_document_through_submit_endpoint(self):
+		store = self.create_store()
+		response = self.client.post(
+			reverse('store_management:store-kyc-submit', kwargs={'slug': store['slug']}),
+			self.kyc_payload(),
+			format='multipart',
+		)
+		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+		self.assertEqual(response.data['document_type'], 'business_registration')
+		self.assertIn('kyc/', response.data['document'])
+
 	def test_seller_cannot_submit_duplicate_pending_kyc(self):
 		store = self.create_store()
 		url = reverse('store_management:store-kyc-submit', kwargs={'slug': store['slug']})
-		data = {
-			'business_name': 'Nairobi Clay Studio Ltd',
-			'business_registration_number': 'BRN-001',
-			'tax_identification_number': 'TAX-001',
-		}
+		data = self.kyc_payload()
 
-		self.assertEqual(self.client.post(url, data, format='json').status_code, status.HTTP_201_CREATED)
+		self.assertEqual(self.client.post(url, data, format='multipart').status_code, status.HTTP_201_CREATED)
 		response = self.client.post(url, data, format='json')
 
 		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
@@ -173,12 +186,7 @@ class StoreApiTests(TestCase):
 		store = self.create_store()
 		self.client.post(
 			reverse('store_management:store-kyc-submit', kwargs={'slug': store['slug']}),
-			{
-				'business_name': 'Nairobi Clay Studio Ltd',
-				'business_registration_number': 'BRN-001',
-				'tax_identification_number': 'TAX-001',
-			},
-			format='json',
+			self.kyc_payload(), format='multipart',
 		)
 		admin = User.objects.create_superuser(email='admin@example.com', password='AdminPassword123!')
 		self.authenticate_as(admin)
@@ -197,12 +205,7 @@ class StoreApiTests(TestCase):
 		store = self.create_store()
 		self.client.post(
 			reverse('store_management:store-kyc-submit', kwargs={'slug': store['slug']}),
-			{
-				'business_name': 'Nairobi Clay Studio Ltd',
-				'business_registration_number': 'BRN-001',
-				'tax_identification_number': 'TAX-001',
-			},
-			format='json',
+			self.kyc_payload(), format='multipart',
 		)
 		admin = User.objects.create_superuser(email='admin@example.com', password='AdminPassword123!')
 		self.authenticate_as(admin)
@@ -218,12 +221,8 @@ class StoreApiTests(TestCase):
 	def test_seller_can_resubmit_rejected_kyc(self):
 		store = self.create_store()
 		url = reverse('store_management:store-kyc-submit', kwargs={'slug': store['slug']})
-		data = {
-			'business_name': 'Nairobi Clay Studio Ltd',
-			'business_registration_number': 'BRN-001',
-			'tax_identification_number': 'TAX-001',
-		}
-		self.client.post(url, data, format='json')
+		data = self.kyc_payload()
+		self.client.post(url, data, format='multipart')
 		admin = User.objects.create_superuser(email='admin@example.com', password='AdminPassword123!')
 		self.authenticate_as(admin)
 		self.client.post(
@@ -243,12 +242,7 @@ class StoreApiTests(TestCase):
 		store = self.create_store()
 		self.client.post(
 			reverse('store_management:store-kyc-submit', kwargs={'slug': store['slug']}),
-			{
-				'business_name': 'Nairobi Clay Studio Ltd',
-				'business_registration_number': 'BRN-001',
-				'tax_identification_number': 'TAX-001',
-			},
-			format='json',
+			self.kyc_payload(), format='multipart',
 		)
 
 		response = self.client.post(
@@ -263,12 +257,7 @@ class StoreApiTests(TestCase):
 		store = self.create_store()
 		self.client.post(
 			reverse('store_management:store-kyc-submit', kwargs={'slug': store['slug']}),
-			{
-				'business_name': 'Nairobi Clay Studio Ltd',
-				'business_registration_number': 'BRN-001',
-				'tax_identification_number': 'TAX-001',
-			},
-			format='json',
+			self.kyc_payload(), format='multipart',
 		)
 		staff = User.objects.create_user(
 			email='staff@example.com',
@@ -291,12 +280,7 @@ class StoreApiTests(TestCase):
 		store = self.create_store()
 		self.client.post(
 			reverse('store_management:store-kyc-submit', kwargs={'slug': store['slug']}),
-			{
-				'business_name': 'Nairobi Clay Studio Ltd',
-				'business_registration_number': 'BRN-001',
-				'tax_identification_number': 'TAX-001',
-			},
-			format='json',
+			self.kyc_payload(), format='multipart',
 		)
 		other_seller = User.objects.create_user(
 			email='other-seller@example.com',

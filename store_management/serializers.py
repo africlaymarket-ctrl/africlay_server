@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Store, StoreKYC, StoreKYCStatus
+from .models import Store, StoreKYC, StoreKYCDocumentType, StoreKYCStatus
 
 
 class StoreSerializer(serializers.ModelSerializer):
@@ -21,11 +21,20 @@ class StoreSerializer(serializers.ModelSerializer):
             'city',
             'country',
             'country_code',
+			'logo',
+			'banner',
+			'average_rating',
+			'total_reviews',
+			'total_orders',
+			'total_products',
             'status',
             'created_at',
             'updated_at',
         ]
-        read_only_fields = ['id', 'owner', 'status', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id', 'owner', 'status', 'average_rating', 'total_reviews', 'total_orders',
+            'total_products', 'created_at', 'updated_at',
+        ]
 
 
 class StoreKYCSerializer(serializers.ModelSerializer):
@@ -40,6 +49,8 @@ class StoreKYCSerializer(serializers.ModelSerializer):
             'business_name',
             'business_registration_number',
             'tax_identification_number',
+			'document_type',
+			'document',
             'status',
             'submitted_at',
             'reviewed_at',
@@ -59,6 +70,16 @@ class StoreKYCSerializer(serializers.ModelSerializer):
             'created_at',
             'updated_at',
         ]
+
+    def validate(self, attrs):
+        existing_document = getattr(self.instance, 'document', None)
+        document = attrs.get('document', existing_document)
+        document_type = attrs.get('document_type', getattr(self.instance, 'document_type', ''))
+        if not document:
+            raise serializers.ValidationError({'document': 'A verification document is required.'})
+        if not document_type:
+            raise serializers.ValidationError({'document_type': 'Document type is required.'})
+        return attrs
 
 
 class StoreKYCReviewSerializer(serializers.Serializer):
