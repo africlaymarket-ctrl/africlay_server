@@ -1,14 +1,17 @@
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient
 from django.test import TestCase
+from django.utils import timezone
 
 from authapp.models import UserRole
 from authapp.utils import generate_access_token
-from store_management.models import Store
+from store_management.models import Store, StoreKYC, StoreKYCStatus
+from .models import Category, Tag
 
 
 User = get_user_model()
@@ -53,6 +56,14 @@ class ProductApiTests(TestCase):
 		token = generate_access_token(user)
 		self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
 
+	def approve_store_kyc(self, store=None):
+		StoreKYC.objects.create(
+			store=store or self.store, business_name='Nairobi Clay Studio Ltd',
+			business_registration_number='BRN-001', tax_identification_number='TAX-001',
+			document_type='business_registration', document='kyc/test.pdf',
+			status=StoreKYCStatus.APPROVED, submitted_at=timezone.now(), reviewed_at=timezone.now(),
+		)
+
 	def test_verified_seller_can_create_product_for_owned_store(self):
 		self.authenticate_as(self.seller)
 
@@ -94,6 +105,7 @@ class ProductApiTests(TestCase):
 		self.assertEqual(create_response.data['status'], 'draft')
 
 	def test_public_catalogue_returns_published_product(self):
+		self.approve_store_kyc()
 		self.authenticate_as(self.seller)
 		create_response = self.client.post(
 			reverse('product_management:product-manage-list'),
@@ -109,6 +121,7 @@ class ProductApiTests(TestCase):
 		self.assertEqual(response.data[0]['slug'], create_response.data['slug'])
 
 	def test_public_catalogue_can_retrieve_product_by_slug(self):
+		self.approve_store_kyc()
 		self.authenticate_as(self.seller)
 		self.client.post(
 			reverse('product_management:product-manage-list'),
@@ -134,3 +147,50 @@ class ProductApiTests(TestCase):
 		)
 
 		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+	def test_seller_cannot_publish_product_before_kyc_approval(self):
+		self.authenticate_as(self.seller)
+		response = self.client.post(
+			reverse('product_management:product-manage-list'),
+			{**self.product_data, 'status': 'published'}, format='json',
+		)
+		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+		self.assertIn('KYC', str(response.data))
+
+	def test_admin_can_create_category_and_tag_then_seller_assigns_them(self):
+		admin = User.objects.create_superuser(email='admin@example.com', password='AdminPassword123!')
+		self.authenticate_as(admin)
+		category_response = self.client.post(
+			reverse('product_management:category-list'),
+			{'name': 'Ceramics', 'slug': 'ceramics'}, format='json',
+		)
+		tag_response = self.client.post(
+			reverse('product_management:tag-list'),
+			{'name': 'Handmade', 'slug': 'handmade'}, format='json',
+		)
+		self.assertEqual(category_response.status_code, status.HTTP_201_CREATED)
+		self.assertEqual(tag_response.status_code, status.HTTP_201_CREATED)
+
+		self.authenticate_as(self.seller)
+		response = self.client.post(
+			reverse('product_management:product-manage-list'),
+			{**self.product_data, 'category': category_response.data['id'], 'tags': [tag_response.data['id']]},
+			format='json',
+		)
+		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+		self.assertEqual(str(response.data['category']), category_response.data['id'])
+		self.assertEqual([str(tag_id) for tag_id in response.data['tags']], [tag_response.data['id']])
+
+	def test_seller_can_upload_product_image_through_endpoint(self):
+		self.authenticate_as(self.seller)
+		product_response = self.client.post(
+			reverse('product_management:product-manage-list'), self.product_data, format='json',
+		)
+		image = SimpleUploadedFile('mug.gif', b'GIF87a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02L\x01\x00;', content_type='image/gif')
+		response = self.client.post(
+			reverse('product_management:product-image-list', kwargs={'pk': product_response.data['id']}),
+			{'image': image, 'alt_text': 'Hand-thrown mug', 'is_primary': True},
+			format='multipart',
+		)
+		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+		self.assertIn('products/', response.data['image'])

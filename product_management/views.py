@@ -3,11 +3,44 @@ from rest_framework.exceptions import MethodNotAllowed, PermissionDenied, Valida
 from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404
 
-from authapp.permissions import IsSeller, IsVerifiedUser
-from store_management.models import Store, StoreStatus
+from authapp.permissions import IsAdminRole, IsSeller, IsVerifiedUser
+from core.services import require_approved_kyc_for_publication
+from store_management.models import Store, StoreKYCStatus, StoreStatus
 
-from .models import Product, ProductStatus
-from .serializers import ProductSerializer
+from .models import Category, Product, ProductImage, ProductStatus, ProductVariant, Tag
+from .serializers import CategorySerializer, ProductImageSerializer, ProductSerializer, ProductVariantSerializer, TagSerializer
+
+
+class CategoryListCreateView(generics.ListCreateAPIView):
+    queryset = Category.objects.select_related('parent')
+    serializer_class = CategorySerializer
+
+    def get_permissions(self):
+        return [permissions.AllowAny()] if self.request.method == 'GET' else [IsAdminRole()]
+
+
+class CategoryDetailView(generics.RetrieveUpdateAPIView):
+    queryset = Category.objects.select_related('parent')
+    serializer_class = CategorySerializer
+
+    def get_permissions(self):
+        return [permissions.AllowAny()] if self.request.method == 'GET' else [IsAdminRole()]
+
+
+class TagListCreateView(generics.ListCreateAPIView):
+    queryset = Tag.objects.all()
+    serializer_class = TagSerializer
+
+    def get_permissions(self):
+        return [permissions.AllowAny()] if self.request.method == 'GET' else [IsAdminRole()]
+
+
+class TagDetailView(generics.RetrieveUpdateAPIView):
+    queryset = Tag.objects.all()
+    serializer_class = TagSerializer
+
+    def get_permissions(self):
+        return [permissions.AllowAny()] if self.request.method == 'GET' else [IsAdminRole()]
 
 
 class ProductListView(generics.ListAPIView):
@@ -18,7 +51,8 @@ class ProductListView(generics.ListAPIView):
         return Product.objects.filter(
             status=ProductStatus.PUBLISHED,
             store__status=StoreStatus.ACTIVE,
-        ).select_related('store')
+            store__kyc__status=StoreKYCStatus.APPROVED,
+        ).select_related('store', 'category').prefetch_related('tags', 'images', 'variants')
 
 
 class ProductManageListCreateView(generics.ListCreateAPIView):
@@ -26,7 +60,7 @@ class ProductManageListCreateView(generics.ListCreateAPIView):
     permission_classes = [IsSeller, IsVerifiedUser]
 
     def get_queryset(self):
-        return Product.objects.filter(store__owner=self.request.user).select_related('store')
+        return Product.objects.filter(store__owner=self.request.user).select_related('store', 'category').prefetch_related('tags', 'images', 'variants')
 
     def perform_create(self, serializer):
         try:
@@ -35,6 +69,7 @@ class ProductManageListCreateView(generics.ListCreateAPIView):
             raise ValidationError({'store': 'Create a store before adding products.'}) from error
         try:
             with transaction.atomic():
+                require_approved_kyc_for_publication(store, serializer.validated_data.get('status'), ProductStatus.PUBLISHED)
                 serializer.save(store=store)
         except IntegrityError as error:
             raise ValidationError({'product': 'A product with this slug or SKU already exists.'}) from error
@@ -45,9 +80,9 @@ class ProductDetailView(generics.RetrieveUpdateAPIView):
     lookup_field = 'pk'
 
     def get_queryset(self):
-        products = Product.objects.select_related('store')
+        products = Product.objects.select_related('store', 'category').prefetch_related('tags', 'images', 'variants')
         if self.kwargs.get('slug'):
-            return products.filter(status=ProductStatus.PUBLISHED, store__status=StoreStatus.ACTIVE)
+            return products.filter(status=ProductStatus.PUBLISHED, store__status=StoreStatus.ACTIVE, store__kyc__status=StoreKYCStatus.APPROVED)
         if self.request.user.is_admin_role:
             return products
         return products.filter(store__owner=self.request.user)
@@ -75,4 +110,33 @@ class ProductDetailView(generics.RetrieveUpdateAPIView):
     def perform_update(self, serializer):
         if serializer.instance.store.owner_id != self.request.user.id and not self.request.user.is_admin_role:
             raise PermissionDenied('You do not own this product.')
+        require_approved_kyc_for_publication(
+            serializer.instance.store,
+            serializer.validated_data.get('status', serializer.instance.status),
+            ProductStatus.PUBLISHED,
+        )
         serializer.save()
+
+
+class ProductImageListCreateView(generics.ListCreateAPIView):
+    serializer_class = ProductImageSerializer
+    permission_classes = [IsSeller, IsVerifiedUser]
+
+    def get_queryset(self):
+        return ProductImage.objects.filter(product_id=self.kwargs['pk'], product__store__owner=self.request.user)
+
+    def perform_create(self, serializer):
+        product = get_object_or_404(Product, pk=self.kwargs['pk'], store__owner=self.request.user)
+        serializer.save(product=product)
+
+
+class ProductVariantListCreateView(generics.ListCreateAPIView):
+    serializer_class = ProductVariantSerializer
+    permission_classes = [IsSeller, IsVerifiedUser]
+
+    def get_queryset(self):
+        return ProductVariant.objects.filter(product_id=self.kwargs['pk'], product__store__owner=self.request.user)
+
+    def perform_create(self, serializer):
+        product = get_object_or_404(Product, pk=self.kwargs['pk'], store__owner=self.request.user)
+        serializer.save(product=product)
