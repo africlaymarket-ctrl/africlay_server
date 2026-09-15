@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     'store_management',
     'product_management',
     'shopping',
+    'payments',
     #swagger
     'drf_spectacular',
     'drf_spectacular_sidecar',
@@ -76,6 +77,15 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticated',
     ),
 }
+
+MPESA_BASE_URL = os.getenv('MPESA_BASE_URL', 'https://sandbox.safaricom.co.ke')
+MPESA_CONSUMER_KEY = os.getenv('MPESA_CONSUMER_KEY', '')
+MPESA_CONSUMER_SECRET = os.getenv('MPESA_CONSUMER_SECRET', '')
+MPESA_SHORT_CODE = os.getenv('MPESA_SHORT_CODE', '')
+MPESA_PASSKEY = os.getenv('MPESA_PASSKEY', '')
+MPESA_CALLBACK_URL = os.getenv('MPESA_CALLBACK_URL', '')
+MPESA_CALLBACK_SECRET = os.getenv('MPESA_CALLBACK_SECRET', '')
+MPESA_REQUEST_TIMEOUT = float(os.getenv('MPESA_REQUEST_TIMEOUT', '15'))
 
 SPECTACULAR_SETTINGS = {
     'TITLE': 'Africlay Server API',
