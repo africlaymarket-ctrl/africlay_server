@@ -15,6 +15,7 @@ urlpatterns = [
     path('api/services/', include('service_management.urls', namespace='service_management')),
     path('api/cart/', include('shopping.urls', namespace='shopping')),
     path('api/common/', include('utility_services.urls', namespace='utility_services')),
+    path('api/messages/', include('messaging.urls', namespace='messages')),
 
     # DRF Spectacular OpenAPI & API Docs
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
