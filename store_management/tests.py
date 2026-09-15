@@ -6,6 +6,7 @@ from django.test import TestCase
 
 from authapp.models import UserRole
 from authapp.utils import generate_access_token
+from .models import StoreKYC, StoreKYCStatus
 
 
 User = get_user_model()
@@ -33,11 +34,17 @@ class StoreApiTests(TestCase):
 	def test_verified_seller_can_create_store(self):
 		self.authenticate_as(self.seller)
 
-		response = self.client.post(reverse('store_management:store-list-create'), self.store_data, format='json')
+		response = self.client.post(
+			reverse('store_management:store-list-create'),
+			{**self.store_data, 'legal_name': 'Nairobi Clay Studio Ltd', 'city': 'Nairobi'},
+			format='json',
+		)
 
 		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 		self.assertEqual(response.data['name'], self.store_data['name'])
 		self.assertEqual(response.data['slug'], self.store_data['slug'])
+		self.assertEqual(response.data['legal_name'], 'Nairobi Clay Studio Ltd')
+		self.assertEqual(response.data['city'], 'Nairobi')
 		self.assertEqual(response.data['owner'], str(self.seller.id))
 
 	def test_buyer_cannot_create_store(self):
@@ -75,6 +82,32 @@ class StoreApiTests(TestCase):
 
 		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
+	def test_staff_seller_cannot_update_another_sellers_store(self):
+		self.create_store()
+		other_seller = User.objects.create_user(
+			email='other-seller@example.com',
+			password='StrongPassword123!',
+			role=UserRole.SELLER,
+			is_verified=True,
+		)
+		other_store = self.create_store(other_seller, slug='other-clay-studio')
+		staff_seller = User.objects.create_user(
+			email='staff-seller@example.com',
+			password='StrongPassword123!',
+			role=UserRole.SELLER,
+			is_staff=True,
+			is_verified=True,
+		)
+		self.authenticate_as(staff_seller)
+
+		response = self.client.patch(
+			reverse('store_management:store-detail', kwargs={'slug': other_store['slug']}),
+			{'description': 'Unauthorized update'},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
 	def test_anonymous_user_can_retrieve_active_store(self):
 		self.authenticate_as(self.seller)
 		create_response = self.client.post(
@@ -93,3 +126,188 @@ class StoreApiTests(TestCase):
 
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
 		self.assertEqual(response.data['name'], self.store_data['name'])
+
+	def create_store(self, user=None, slug=None):
+		self.authenticate_as(user or self.seller)
+		response = self.client.post(
+			reverse('store_management:store-list-create'),
+			{**self.store_data, 'slug': slug or self.store_data['slug']},
+			format='json',
+		)
+		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+		return response.data
+
+	def test_seller_can_submit_store_kyc(self):
+		store = self.create_store()
+		response = self.client.post(
+			reverse('store_management:store-kyc-submit', kwargs={'slug': store['slug']}),
+			{
+				'business_name': 'Nairobi Clay Studio Ltd',
+				'business_registration_number': 'BRN-001',
+				'tax_identification_number': 'TAX-001',
+			},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+		self.assertEqual(response.data['status'], StoreKYCStatus.PENDING)
+		self.assertEqual(response.data['store'], store['id'])
+		self.assertIsNotNone(response.data['submitted_at'])
+
+	def test_seller_cannot_submit_duplicate_pending_kyc(self):
+		store = self.create_store()
+		url = reverse('store_management:store-kyc-submit', kwargs={'slug': store['slug']})
+		data = {
+			'business_name': 'Nairobi Clay Studio Ltd',
+			'business_registration_number': 'BRN-001',
+			'tax_identification_number': 'TAX-001',
+		}
+
+		self.assertEqual(self.client.post(url, data, format='json').status_code, status.HTTP_201_CREATED)
+		response = self.client.post(url, data, format='json')
+
+		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+		self.assertEqual(StoreKYC.objects.count(), 1)
+
+	def test_admin_can_approve_submitted_kyc(self):
+		store = self.create_store()
+		self.client.post(
+			reverse('store_management:store-kyc-submit', kwargs={'slug': store['slug']}),
+			{
+				'business_name': 'Nairobi Clay Studio Ltd',
+				'business_registration_number': 'BRN-001',
+				'tax_identification_number': 'TAX-001',
+			},
+			format='json',
+		)
+		admin = User.objects.create_superuser(email='admin@example.com', password='AdminPassword123!')
+		self.authenticate_as(admin)
+
+		response = self.client.post(
+			reverse('store_management:store-kyc-review', kwargs={'slug': store['slug']}),
+			{'decision': 'approved'},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(response.data['status'], StoreKYCStatus.APPROVED)
+		self.assertEqual(response.data['reviewed_by'], str(admin.id))
+
+	def test_admin_rejection_requires_reason(self):
+		store = self.create_store()
+		self.client.post(
+			reverse('store_management:store-kyc-submit', kwargs={'slug': store['slug']}),
+			{
+				'business_name': 'Nairobi Clay Studio Ltd',
+				'business_registration_number': 'BRN-001',
+				'tax_identification_number': 'TAX-001',
+			},
+			format='json',
+		)
+		admin = User.objects.create_superuser(email='admin@example.com', password='AdminPassword123!')
+		self.authenticate_as(admin)
+
+		response = self.client.post(
+			reverse('store_management:store-kyc-review', kwargs={'slug': store['slug']}),
+			{'decision': 'rejected'},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+	def test_seller_can_resubmit_rejected_kyc(self):
+		store = self.create_store()
+		url = reverse('store_management:store-kyc-submit', kwargs={'slug': store['slug']})
+		data = {
+			'business_name': 'Nairobi Clay Studio Ltd',
+			'business_registration_number': 'BRN-001',
+			'tax_identification_number': 'TAX-001',
+		}
+		self.client.post(url, data, format='json')
+		admin = User.objects.create_superuser(email='admin@example.com', password='AdminPassword123!')
+		self.authenticate_as(admin)
+		self.client.post(
+			reverse('store_management:store-kyc-review', kwargs={'slug': store['slug']}),
+			{'decision': 'rejected', 'rejection_reason': 'Document needs correction.'},
+			format='json',
+		)
+
+		self.authenticate_as(self.seller)
+		response = self.client.post(url, {**data, 'business_name': 'Updated Studio Ltd'}, format='json')
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(response.data['status'], StoreKYCStatus.PENDING)
+		self.assertEqual(response.data['business_name'], 'Updated Studio Ltd')
+
+	def test_non_admin_cannot_review_kyc(self):
+		store = self.create_store()
+		self.client.post(
+			reverse('store_management:store-kyc-submit', kwargs={'slug': store['slug']}),
+			{
+				'business_name': 'Nairobi Clay Studio Ltd',
+				'business_registration_number': 'BRN-001',
+				'tax_identification_number': 'TAX-001',
+			},
+			format='json',
+		)
+
+		response = self.client.post(
+			reverse('store_management:store-kyc-review', kwargs={'slug': store['slug']}),
+			{'decision': 'approved'},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+	def test_staff_user_cannot_review_kyc(self):
+		store = self.create_store()
+		self.client.post(
+			reverse('store_management:store-kyc-submit', kwargs={'slug': store['slug']}),
+			{
+				'business_name': 'Nairobi Clay Studio Ltd',
+				'business_registration_number': 'BRN-001',
+				'tax_identification_number': 'TAX-001',
+			},
+			format='json',
+		)
+		staff = User.objects.create_user(
+			email='staff@example.com',
+			password='StaffPassword123!',
+			role=UserRole.BUYER,
+			is_staff=True,
+			is_verified=True,
+		)
+		self.authenticate_as(staff)
+
+		response = self.client.post(
+			reverse('store_management:store-kyc-review', kwargs={'slug': store['slug']}),
+			{'decision': 'approved'},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+	def test_seller_cannot_retrieve_another_sellers_kyc(self):
+		store = self.create_store()
+		self.client.post(
+			reverse('store_management:store-kyc-submit', kwargs={'slug': store['slug']}),
+			{
+				'business_name': 'Nairobi Clay Studio Ltd',
+				'business_registration_number': 'BRN-001',
+				'tax_identification_number': 'TAX-001',
+			},
+			format='json',
+		)
+		other_seller = User.objects.create_user(
+			email='other-seller@example.com',
+			password='StrongPassword123!',
+			role=UserRole.SELLER,
+			is_verified=True,
+		)
+		self.authenticate_as(other_seller)
+
+		response = self.client.get(
+			reverse('store_management:store-kyc-detail', kwargs={'slug': store['slug']}),
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)

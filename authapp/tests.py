@@ -37,6 +37,21 @@ class AuthTestCase(TestCase):
         self.assertEqual(self.user.full_name, 'John Doe')
         self.assertTrue(self.user.is_buyer)
 
+    def test_user_uses_shared_timestamp_fields(self):
+        """All timestamped models expose the shared creation/update contract."""
+        created_at = self.user.created_at
+        updated_at = self.user.updated_at
+        self.assertIsNotNone(self.user.created_at)
+        self.assertIsNotNone(self.user.updated_at)
+        self.assertLessEqual(self.user.created_at, self.user.updated_at)
+
+        self.user.profile.bio = 'Updated profile'
+        self.user.profile.save()
+        self.user.refresh_from_db()
+
+        self.assertEqual(self.user.created_at, created_at)
+        self.assertGreaterEqual(self.user.updated_at, updated_at)
+
     def test_create_superuser(self):
         """Test superuser creation."""
         admin = User.objects.create_superuser(
