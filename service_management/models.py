@@ -71,3 +71,29 @@ class ServiceImage(TimestampedModel):
                 name='one_primary_image_per_service',
             ),
         ]
+
+
+class BookingStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending'
+    CONFIRMED = 'confirmed', 'Confirmed'
+    CANCELLED = 'cancelled', 'Cancelled'
+    COMPLETED = 'completed', 'Completed'
+
+
+class Booking(TimestampedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    service = models.ForeignKey(Service, on_delete=models.CASCADE, related_name='bookings')
+    customer = models.ForeignKey('authapp.User', on_delete=models.CASCADE, related_name='bookings')
+    scheduled_at = models.DateTimeField()
+    notes = models.TextField(blank=True, default='')
+    status = models.CharField(max_length=20, choices=BookingStatus.choices, default=BookingStatus.PENDING)
+
+    class Meta:
+        ordering = ['-scheduled_at']
+        indexes = [
+            models.Index(fields=['customer', '-scheduled_at']),
+            models.Index(fields=['service', 'status']),
+        ]
+
+    def __str__(self):
+        return f'Booking {self.id} for {self.service.name} by {self.customer.email}'

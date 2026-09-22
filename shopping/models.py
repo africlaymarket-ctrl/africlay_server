@@ -75,3 +75,23 @@ class OrderItem(TimestampedModel):
 
     def __str__(self):
         return f"{self.quantity}x {self.product.name} in Order {self.order.id}"
+
+
+class Wishlist(TimestampedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='wishlist')
+
+    def __str__(self):
+        return f"Wishlist of {self.user.email}"
+
+
+class WishlistItem(TimestampedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    wishlist = models.ForeignKey(Wishlist, on_delete=models.CASCADE, related_name='items')
+    product = models.ForeignKey('product_management.Product', on_delete=models.CASCADE)
+
+    class Meta:
+        unique_together = ('wishlist', 'product')
+
+    def __str__(self):
+        return f"{self.product.name} in {self.wishlist.user.email}'s wishlist"

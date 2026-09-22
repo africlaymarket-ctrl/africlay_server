@@ -44,6 +44,8 @@ INSTALLED_APPS = [
     'shopping',
     'utility_services',
     'messaging',
+    'notifications',
+    'reviews',
     # API Documentation (Swagger / OpenAPI)
     'drf_spectacular',
     'drf_spectacular_sidecar',

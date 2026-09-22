@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Service, ServiceCategory, ServiceImage
+from .models import Booking, Service, ServiceCategory, ServiceImage
 
 
 class ServiceCategorySerializer(serializers.ModelSerializer):
@@ -32,3 +32,33 @@ class ServiceSerializer(serializers.ModelSerializer):
 
     def validate_currency(self, value):
         return value.upper()
+
+
+class BookingSerializer(serializers.ModelSerializer):
+    customer_id = serializers.UUIDField(source='customer_id', read_only=True)
+    service_name = serializers.CharField(source='service.name', read_only=True)
+
+    class Meta:
+        model = Booking
+        fields = ['id', 'service', 'customer_id', 'service_name', 'scheduled_at', 'notes', 'status', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'customer_id', 'service_name', 'status', 'created_at', 'updated_at']
+
+
+class BookingStatusUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Booking
+        fields = ['status']
+
+    def validate_status(self, value):
+        current_status = self.instance.status
+        allowed_transitions = {
+            'pending': {'confirmed', 'cancelled'},
+            'confirmed': {'completed', 'cancelled'},
+            'cancelled': set(),
+            'completed': set(),
+        }
+        if value not in allowed_transitions.get(current_status, set()):
+            raise serializers.ValidationError(
+                f'Bookings cannot transition from {current_status} to {value}.'
+            )
+        return value

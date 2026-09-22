@@ -3,12 +3,12 @@ from django.shortcuts import get_object_or_404
 from rest_framework import generics, permissions
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
-from authapp.permissions import IsAdminRole, IsSeller, IsVerifiedUser
+from authapp.permissions import IsAdminRole, IsAuthenticated, IsSeller, IsVerifiedUser
 from core.services import require_approved_kyc_for_publication
 from store_management.models import Store, StoreKYCStatus, StoreStatus
 
-from .models import Service, ServiceCategory, ServiceImage, ServiceStatus
-from .serializers import ServiceCategorySerializer, ServiceImageSerializer, ServiceSerializer
+from .models import Booking, BookingStatus, Service, ServiceCategory, ServiceImage, ServiceStatus
+from .serializers import BookingSerializer, BookingStatusUpdateSerializer, ServiceCategorySerializer, ServiceImageSerializer, ServiceSerializer
 
 
 class ServiceCategoryListCreateView(generics.ListCreateAPIView):
@@ -104,3 +104,56 @@ class ServiceImageListCreateView(generics.ListCreateAPIView):
     def perform_create(self, serializer):
         service = get_object_or_404(Service, pk=self.kwargs['pk'], store__owner=self.request.user)
         serializer.save(service=service)
+
+
+class BookingListCreateView(generics.ListCreateAPIView):
+    """Customers create and list their own bookings."""
+    serializer_class = BookingSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Booking.objects.filter(customer=self.request.user).select_related('service')
+
+    def perform_create(self, serializer):
+        service = get_object_or_404(
+            Service,
+            pk=serializer.validated_data['service'].pk,
+            status=ServiceStatus.PUBLISHED,
+            store__status=StoreStatus.ACTIVE,
+            store__kyc__status=StoreKYCStatus.APPROVED,
+        )
+        serializer.save(customer=self.request.user, service=service)
+
+
+class BookingDetailView(generics.RetrieveDestroyAPIView):
+    """Customer can view or cancel their booking."""
+    serializer_class = BookingSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Booking.objects.filter(customer=self.request.user).select_related('service')
+
+    def perform_destroy(self, instance):
+        if instance.status not in [BookingStatus.PENDING, BookingStatus.CONFIRMED]:
+            raise ValidationError({'status': 'Only pending or confirmed bookings can be cancelled.'})
+        instance.status = BookingStatus.CANCELLED
+        instance.save(update_fields=['status', 'updated_at'])
+
+
+class SellerBookingListView(generics.ListAPIView):
+    """Sellers list bookings for their services."""
+    serializer_class = BookingSerializer
+    permission_classes = [IsSeller, IsVerifiedUser]
+
+    def get_queryset(self):
+        return Booking.objects.filter(service__store__owner=self.request.user).select_related('service', 'customer')
+
+
+class SellerBookingStatusUpdateView(generics.UpdateAPIView):
+    """Sellers update booking status."""
+    serializer_class = BookingStatusUpdateSerializer
+    permission_classes = [IsSeller, IsVerifiedUser]
+    http_method_names = ['patch']
+
+    def get_queryset(self):
+        return Booking.objects.filter(service__store__owner=self.request.user)

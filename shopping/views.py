@@ -2,13 +2,14 @@ from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
 from django.db import transaction, IntegrityError
+from django.db.models import Count
 from decimal import Decimal
 
-from authapp.permissions import IsAuthenticated
+from authapp.permissions import IsAuthenticated, IsSeller, IsVerifiedUser
 from product_management.models import Product
 
-from .models import Cart, CartItem, Order, OrderItem, OrderStatus
-from .serializers import CartSerializer, CartItemSerializer, CreateCheckoutSerializer, OrderDetailSerializer
+from .models import Cart, CartItem, Order, OrderItem, OrderStatus, Wishlist, WishlistItem
+from .serializers import CartSerializer, CartItemSerializer, CreateCheckoutSerializer, OrderDetailSerializer, OrderStatusUpdateSerializer, WishlistSerializer, WishlistItemSerializer
 
 
 class CartDetailView(generics.GenericAPIView):
@@ -190,3 +191,70 @@ class OrderListView(generics.ListAPIView):
 
     def get_queryset(self):
         return Order.objects.filter(buyer=self.request.user).prefetch_related('items').order_by('-created_at')
+
+
+class SellerOrderListView(generics.ListAPIView):
+    """Lists all orders that contain items sold by the requesting seller."""
+    serializer_class = OrderDetailSerializer
+    permission_classes = [IsSeller, IsVerifiedUser]
+
+    def get_queryset(self):
+        order_ids = OrderItem.objects.filter(seller=self.request.user).values_list('order_id', flat=True)
+        return Order.objects.filter(id__in=order_ids).annotate(
+            seller_count=Count('items__seller', distinct=True),
+        ).filter(seller_count=1).prefetch_related('items').order_by('-created_at')
+
+
+class SellerOrderStatusUpdateView(generics.UpdateAPIView):
+    """Allows a seller to update the status of an order containing their items."""
+    serializer_class = OrderStatusUpdateSerializer
+    permission_classes = [IsSeller, IsVerifiedUser]
+    http_method_names = ['patch']
+
+    def get_queryset(self):
+        order_ids = OrderItem.objects.filter(seller=self.request.user).values_list('order_id', flat=True)
+        return Order.objects.filter(id__in=order_ids).annotate(
+            seller_count=Count('items__seller', distinct=True),
+        ).filter(seller_count=1)
+
+
+class WishlistView(generics.GenericAPIView):
+    serializer_class = WishlistSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self):
+        wishlist, _ = Wishlist.objects.get_or_create(user=self.request.user)
+        return wishlist
+
+    def get(self, request, *args, **kwargs):
+        return Response(self.get_serializer(self.get_object()).data)
+
+
+class WishlistItemListCreateView(generics.ListCreateAPIView):
+    serializer_class = WishlistItemSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        wishlist, _ = Wishlist.objects.get_or_create(user=self.request.user)
+        return WishlistItem.objects.filter(wishlist=wishlist).select_related('product')
+
+    def create(self, request, *args, **kwargs):
+        wishlist, _ = Wishlist.objects.get_or_create(user=self.request.user)
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            serializer.save(wishlist=wishlist)
+        except IntegrityError as exc:
+            if 'wishlist_id' in str(exc) or 'product_id' in str(exc):
+                raise ValidationError({'product': 'Product already in wishlist.'}) from exc
+            raise
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class WishlistItemDeleteView(generics.DestroyAPIView):
+    serializer_class = WishlistItemSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        wishlist, _ = Wishlist.objects.get_or_create(user=self.request.user)
+        return WishlistItem.objects.filter(wishlist=wishlist)

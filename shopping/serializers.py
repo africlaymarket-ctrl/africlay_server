@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Cart, CartItem, Order, OrderItem
+from .models import Cart, CartItem, Order, OrderItem, OrderStatus, Wishlist, WishlistItem
 
 
 class CartItemSerializer(serializers.ModelSerializer):
@@ -80,3 +80,35 @@ class CreateCheckoutSerializer(serializers.Serializer):
         if len(value.strip()) < 2:
             raise serializers.ValidationError('Shipping country must be at least 2 characters.')
         return value
+
+
+class OrderStatusUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Order
+        fields = ['status']
+
+    def validate_status(self, value):
+        allowed = [c[0] for c in OrderStatus.choices]
+        if value not in allowed:
+            raise serializers.ValidationError(f'Status must be one of: {allowed}')
+        return value
+
+
+class WishlistItemSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    product_slug = serializers.CharField(source='product.slug', read_only=True)
+    product_price = serializers.DecimalField(source='product.price', read_only=True, max_digits=12, decimal_places=2)
+
+    class Meta:
+        model = WishlistItem
+        fields = ['id', 'product', 'product_name', 'product_slug', 'product_price', 'created_at']
+        read_only_fields = ['id', 'product_name', 'product_slug', 'product_price', 'created_at']
+
+
+class WishlistSerializer(serializers.ModelSerializer):
+    items = WishlistItemSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Wishlist
+        fields = ['id', 'items', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'items', 'created_at', 'updated_at']
