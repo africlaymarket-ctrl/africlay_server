@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     'product_management',
     'service_management',
     'shopping',
+    'payments',
     'utility_services',
     'messaging',
     'notifications',
@@ -185,3 +186,12 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # SMS Gateway Configuration (Cradle Voices / CodeYetuSMS)
 SMS_URL = os.getenv('SMS_URL', 'https://api.cradlevoices.com/v1/sms/send')
 SMS_TOKEN = os.getenv('SMS_TOKEN', '')
+
+# M-Pesa Daraja credentials are supplied by the deployment environment.
+MPESA_ENVIRONMENT = os.getenv('MPESA_ENVIRONMENT', 'sandbox').strip().lower()
+MPESA_CONSUMER_KEY = os.getenv('MPESA_CONSUMER_KEY', '')
+MPESA_CONSUMER_SECRET = os.getenv('MPESA_CONSUMER_SECRET', '')
+MPESA_SHORTCODE = os.getenv('MPESA_SHORTCODE', '')
+MPESA_PASSKEY = os.getenv('MPESA_PASSKEY', '')
+MPESA_CALLBACK_BASE_URL = os.getenv('MPESA_CALLBACK_BASE_URL', '').rstrip('/')
+MPESA_PUBLIC_CERT = os.getenv('MPESA_PUBLIC_CERT', '').strip()

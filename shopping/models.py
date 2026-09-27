@@ -37,18 +37,37 @@ class OrderStatus(models.TextChoices):
     CANCELLED = 'cancelled', 'Cancelled'
 
 
+class PaymentMethod(models.TextChoices):
+    WALLET = 'wallet', 'Wallet'
+    MPESA = 'mpesa', 'M-Pesa'
+    CARD = 'card', 'Card'
+
+
+class PaymentStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending'
+    PAID = 'paid', 'Paid'
+    FAILED = 'failed', 'Failed'
+    REFUNDED = 'refunded', 'Refunded'
+
+
 class Order(TimestampedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     buyer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='orders')
     total_amount = models.DecimalField(max_digits=12, decimal_places=2)
     currency = models.CharField(max_length=3, default='KES')
     status = models.CharField(max_length=20, choices=OrderStatus.choices, default=OrderStatus.PENDING)
+    payment_method = models.CharField(max_length=20, choices=PaymentMethod.choices, blank=True)
+    payment_status = models.CharField(max_length=20, choices=PaymentStatus.choices, default=PaymentStatus.PENDING)
 
     # Shipping information
     shipping_address = models.CharField(max_length=500)
     shipping_city = models.CharField(max_length=100)
     shipping_postal_code = models.CharField(max_length=20)
     shipping_country = models.CharField(max_length=100)
+    courier_name = models.CharField(max_length=100, blank=True, default='')
+    tracking_number = models.CharField(max_length=100, blank=True, default='')
+    shipping_cost = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    shipped_at = models.DateTimeField(null=True, blank=True)
 
 
     class Meta:

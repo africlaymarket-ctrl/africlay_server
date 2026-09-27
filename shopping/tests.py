@@ -9,6 +9,9 @@ from authapp.models import UserRole
 from authapp.utils import generate_access_token
 from product_management.models import Product
 from store_management.models import Store
+from payments.models import Wallet, WalletTransaction
+from payments.services import credit_wallet
+from notifications.models import Notification, NotificationType
 
 
 User = get_user_model()
@@ -327,6 +330,261 @@ class CheckoutApiTests(TestCase):
         # Verify cart is now empty
         cart_response = self.client.get(reverse('shopping:cart-detail'))
         self.assertEqual(len(cart_response.data['items']), 0)
+
+    def test_wallet_checkout_places_funds_on_hold(self):
+        self.authenticate_as(self.buyer)
+        wallet = Wallet.objects.create(user=self.buyer, currency='KES')
+        credit_wallet(wallet, Decimal('1500.00'), 'provider:wallet-checkout')
+        self.client.post(
+            reverse('shopping:cart-item-list'),
+            {'product': str(self.product.id), 'quantity': 1},
+            format='json',
+        )
+
+        response = self.client.post(
+            reverse('shopping:checkout'),
+            {
+                'shipping_address': '123 Main St',
+                'shipping_city': 'Nairobi',
+                'shipping_postal_code': '00100',
+                'shipping_country': 'Kenya',
+                'payment_method': 'wallet',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['status'], 'processing')
+        self.assertEqual(response.data['payment_status'], 'paid')
+        wallet.refresh_from_db()
+        self.assertEqual(wallet.balance, Decimal('1500.00'))
+        self.assertEqual(wallet.held_balance, Decimal('1000.00'))
+        self.assertEqual(
+            WalletTransaction.objects.filter(wallet=wallet, transaction_type='escrow_hold').count(),
+            1,
+        )
+
+    def test_checkout_creates_order_notification_for_buyer(self):
+        self.authenticate_as(self.buyer)
+        self.client.post(
+            reverse('shopping:cart-item-list'),
+            {'product': str(self.product.id), 'quantity': 1},
+            format='json',
+        )
+
+        response = self.client.post(
+            reverse('shopping:checkout'),
+            {
+                'shipping_address': '123 Main St',
+                'shipping_city': 'Nairobi',
+                'shipping_postal_code': '00100',
+                'shipping_country': 'Kenya',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(
+            Notification.objects.filter(
+                user=self.buyer,
+                notification_type=NotificationType.ORDER,
+            ).exists()
+        )
+
+    def test_wallet_checkout_with_insufficient_balance_rolls_back(self):
+        self.authenticate_as(self.buyer)
+        wallet = Wallet.objects.create(user=self.buyer, currency='KES')
+        self.client.post(
+            reverse('shopping:cart-item-list'),
+            {'product': str(self.product.id), 'quantity': 1},
+            format='json',
+        )
+
+        response = self.client.post(
+            reverse('shopping:checkout'),
+            {
+                'shipping_address': '123 Main St',
+                'shipping_city': 'Nairobi',
+                'shipping_postal_code': '00100',
+                'shipping_country': 'Kenya',
+                'payment_method': 'wallet',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(self.buyer.orders.exists())
+        self.product.refresh_from_db()
+        wallet.refresh_from_db()
+        self.assertEqual(self.product.stock_quantity, 10)
+        self.assertEqual(wallet.balance, Decimal('0.00'))
+        self.assertTrue(self.buyer.cart.items.exists())
+
+    def test_buyer_confirms_delivery_and_settles_seller_earnings(self):
+        self.authenticate_as(self.buyer)
+        buyer_wallet = Wallet.objects.create(user=self.buyer, currency='KES')
+        credit_wallet(buyer_wallet, Decimal('1200.00'), 'provider:delivery-settlement')
+        self.client.post(
+            reverse('shopping:cart-item-list'),
+            {'product': str(self.product.id), 'quantity': 1},
+            format='json',
+        )
+        checkout = self.client.post(
+            reverse('shopping:checkout'),
+            {
+                'shipping_address': '123 Main St',
+                'shipping_city': 'Nairobi',
+                'shipping_postal_code': '00100',
+                'shipping_country': 'Kenya',
+                'payment_method': 'wallet',
+            },
+            format='json',
+        )
+        order_id = checkout.data['id']
+
+        self.authenticate_as(self.seller)
+        shipped = self.client.patch(
+            reverse('shopping:seller-order-status', args=[order_id]),
+            {
+                'status': 'shipped',
+                'courier_name': 'Sendy',
+                'tracking_number': 'SNDY-DELIVERED-1',
+                'shipping_cost': '150.00',
+            },
+            format='json',
+        )
+        self.assertEqual(shipped.status_code, status.HTTP_200_OK)
+
+        self.authenticate_as(self.buyer)
+        delivered = self.client.post(
+            reverse('shopping:order-confirm-delivery', args=[order_id]),
+            format='json',
+        )
+        self.assertEqual(delivered.status_code, status.HTTP_200_OK)
+        self.assertEqual(delivered.data['status'], 'delivered')
+        self.assertEqual(delivered.data['payment_status'], 'paid')
+
+        repeated = self.client.post(
+            reverse('shopping:order-confirm-delivery', args=[order_id]),
+            format='json',
+        )
+        self.assertEqual(repeated.status_code, status.HTTP_200_OK)
+        buyer_wallet.refresh_from_db()
+        seller_wallet = Wallet.objects.get(user=self.seller, currency='KES')
+        self.assertEqual(buyer_wallet.balance, Decimal('200.00'))
+        self.assertEqual(buyer_wallet.held_balance, Decimal('0.00'))
+        self.assertEqual(seller_wallet.balance, Decimal('1000.00'))
+        self.assertEqual(
+            WalletTransaction.objects.filter(wallet=seller_wallet, transaction_type='seller_earning').count(),
+            1,
+        )
+
+    def test_seller_cancellation_releases_escrow_and_restores_stock(self):
+        self.authenticate_as(self.buyer)
+        buyer_wallet = Wallet.objects.create(user=self.buyer, currency='KES')
+        credit_wallet(buyer_wallet, Decimal('1000.00'), 'provider:seller-cancellation')
+        self.client.post(
+            reverse('shopping:cart-item-list'),
+            {'product': str(self.product.id), 'quantity': 1},
+            format='json',
+        )
+        checkout = self.client.post(
+            reverse('shopping:checkout'),
+            {
+                'shipping_address': '123 Main St',
+                'shipping_city': 'Nairobi',
+                'shipping_postal_code': '00100',
+                'shipping_country': 'Kenya',
+                'payment_method': 'wallet',
+            },
+            format='json',
+        )
+
+        self.authenticate_as(self.seller)
+        response = self.client.patch(
+            reverse('shopping:seller-order-status', args=[checkout.data['id']]),
+            {'status': 'cancelled'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], 'cancelled')
+        self.assertEqual(self.buyer.orders.get().payment_status, 'refunded')
+        buyer_wallet.refresh_from_db()
+        self.product.refresh_from_db()
+        self.assertEqual(buyer_wallet.balance, Decimal('1000.00'))
+        self.assertEqual(buyer_wallet.held_balance, Decimal('0.00'))
+        self.assertEqual(self.product.stock_quantity, 10)
+
+    def test_seller_must_attach_tracking_before_marking_order_shipped(self):
+        self.authenticate_as(self.buyer)
+        buyer_wallet = Wallet.objects.create(user=self.buyer, currency='KES')
+        credit_wallet(buyer_wallet, Decimal('2000.00'), 'provider:shipping-validation')
+        self.client.post(
+            reverse('shopping:cart-item-list'),
+            {'product': str(self.product.id), 'quantity': 1},
+            format='json',
+        )
+        checkout = self.client.post(
+            reverse('shopping:checkout'),
+            {
+                'shipping_address': '123 Main St',
+                'shipping_city': 'Nairobi',
+                'shipping_postal_code': '00100',
+                'shipping_country': 'Kenya',
+                'payment_method': 'wallet',
+            },
+            format='json',
+        )
+
+        self.authenticate_as(self.seller)
+        response = self.client.patch(
+            reverse('shopping:seller-order-status', args=[checkout.data['id']]),
+            {'status': 'shipped'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('shipping', response.data)
+
+    def test_seller_can_record_courier_tracking_when_shipping(self):
+        self.authenticate_as(self.buyer)
+        buyer_wallet = Wallet.objects.create(user=self.buyer, currency='KES')
+        credit_wallet(buyer_wallet, Decimal('2000.00'), 'provider:shipping-tracking')
+        self.client.post(
+            reverse('shopping:cart-item-list'),
+            {'product': str(self.product.id), 'quantity': 1},
+            format='json',
+        )
+        checkout = self.client.post(
+            reverse('shopping:checkout'),
+            {
+                'shipping_address': '123 Main St',
+                'shipping_city': 'Nairobi',
+                'shipping_postal_code': '00100',
+                'shipping_country': 'Kenya',
+                'payment_method': 'wallet',
+            },
+            format='json',
+        )
+
+        self.authenticate_as(self.seller)
+        response = self.client.patch(
+            reverse('shopping:seller-order-status', args=[checkout.data['id']]),
+            {
+                'status': 'shipped',
+                'courier_name': 'Sendy',
+                'tracking_number': 'SNDY-123456',
+                'shipping_cost': '150.00',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], 'shipped')
+        self.assertEqual(response.data['courier_name'], 'Sendy')
+        self.assertEqual(response.data['tracking_number'], 'SNDY-123456')
+        self.assertEqual(float(response.data['shipping_cost']), 150.00)
 
     def test_checkout_decrements_product_stock(self):
         """Test that checkout properly decrements product stock."""
