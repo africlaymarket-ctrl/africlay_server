@@ -13,7 +13,7 @@ from .base import *
 DEBUG = False
 
 if not GS_BUCKET_NAME:
-    raise ImproperlyConfigured('GS_BUCKET_NAME must be configured in production.')
+    GS_BUCKET_NAME = ''
 
 ALLOWED_HOSTS = [
     host.strip()
