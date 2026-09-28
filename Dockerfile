@@ -41,6 +41,9 @@ ENV PATH="/opt/venv/bin:$PATH" \
 # Copy pre-built virtual environment from builder stage
 COPY --from=builder /opt/venv /opt/venv
 
+# Fail the image build if the frozen dependency set does not include Gunicorn.
+RUN test -x /opt/venv/bin/gunicorn
+
 # Copy application code
 COPY . /app
 
@@ -48,4 +51,4 @@ COPY . /app
 EXPOSE 8000
 
 # Run the production WSGI server and honor the platform-provided port.
-CMD ["sh", "-c", "exec gunicorn africlay_server.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 2 --timeout 120"]
+CMD ["sh", "-c", "exec /opt/venv/bin/gunicorn africlay_server.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 2 --timeout 120"]
