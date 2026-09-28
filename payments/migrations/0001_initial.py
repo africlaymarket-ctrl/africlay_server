@@ -5,6 +5,7 @@ import django.db.models.deletion
 import uuid
 from django.conf import settings
 from django.db import migrations, models
+from django.db.models import Q
 
 
 class Migration(migrations.Migration):
@@ -13,6 +14,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
+        ('shopping', '0003_alter_order_shipping_address'),
     ]
 
     operations = [
@@ -33,6 +35,31 @@ class Migration(migrations.Migration):
             },
         ),
         migrations.CreateModel(
+            name='Payment',
+            fields=[
+                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ('provider', models.CharField(default='mpesa', max_length=30)),
+                ('status', models.CharField(choices=[('initiated', 'Initiated'), ('pending', 'Pending'), ('succeeded', 'Succeeded'), ('failed', 'Failed'), ('cancelled', 'Cancelled')], default='initiated', max_length=20)),
+                ('amount', models.DecimalField(decimal_places=2, max_digits=12)),
+                ('currency', models.CharField(default='KES', max_length=3)),
+                ('phone_number', models.CharField(max_length=20)),
+                ('merchant_request_id', models.CharField(blank=True, max_length=100)),
+                ('checkout_request_id', models.CharField(blank=True, max_length=100)),
+                ('receipt_number', models.CharField(blank=True, max_length=100)),
+                ('failure_code', models.CharField(blank=True, max_length=30)),
+                ('failure_message', models.CharField(blank=True, max_length=255)),
+                ('raw_callback_payload', models.JSONField(blank=True, default=dict)),
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('updated_at', models.DateTimeField(auto_now=True)),
+                ('completed_at', models.DateTimeField(blank=True, null=True)),
+                ('order', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='payments', to='shopping.order')),
+            ],
+            options={
+                'indexes': [models.Index(fields=['order', 'status'])],
+                'constraints': [models.UniqueConstraint(condition=Q(('checkout_request_id__gt', '')), fields=('provider', 'checkout_request_id'), name='unique_payment_provider_checkout')],
+            },
+        ),
+        migrations.CreateModel(
             name='WalletTransaction',
             fields=[
                 ('created_at', models.DateTimeField(auto_now_add=True)),
@@ -48,6 +75,29 @@ class Migration(migrations.Migration):
             ],
             options={
                 'ordering': ['-created_at', '-id'],
+            },
+        ),
+        migrations.CreateModel(
+            name='PaymentAttempt',
+            fields=[
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('updated_at', models.DateTimeField(auto_now=True)),
+                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ('amount', models.DecimalField(decimal_places=2, max_digits=12, validators=[django.core.validators.MinValueValidator(1)])),
+                ('phone_number', models.CharField(max_length=12)),
+                ('idempotency_key', models.CharField(max_length=100)),
+                ('callback_token_hash', models.CharField(max_length=64, unique=True)),
+                ('merchant_request_id', models.CharField(blank=True, max_length=100)),
+                ('checkout_request_id', models.CharField(blank=True, max_length=100, null=True, unique=True)),
+                ('provider_receipt', models.CharField(blank=True, max_length=32, null=True, unique=True)),
+                ('status', models.CharField(choices=[('initiated', 'Initiated'), ('pending', 'Pending'), ('succeeded', 'Succeeded'), ('failed', 'Failed'), ('unknown', 'Unknown')], default='initiated', max_length=12)),
+                ('result_description', models.CharField(blank=True, max_length=255)),
+                ('user', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='payment_attempts', to=settings.AUTH_USER_MODEL)),
+                ('wallet', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='payment_attempts', to='payments.wallet')),
+            ],
+            options={
+                'ordering': ['-created_at'],
+                'indexes': [models.Index(fields=['status', 'created_at'])],
             },
         ),
         migrations.AddConstraint(
@@ -69,5 +119,13 @@ class Migration(migrations.Migration):
         migrations.AddConstraint(
             model_name='wallettransaction',
             constraint=models.UniqueConstraint(fields=('wallet', 'reference'), name='unique_wallet_transaction_reference'),
+        ),
+        migrations.AddConstraint(
+            model_name='paymentattempt',
+            constraint=models.UniqueConstraint(fields=('user', 'idempotency_key'), name='unique_user_payment_idempotency_key'),
+        ),
+        migrations.AddConstraint(
+            model_name='paymentattempt',
+            constraint=models.CheckConstraint(condition=models.Q(('amount__gte', 1)), name='payment_attempt_amount_minimum'),
         ),
     ]

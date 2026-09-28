@@ -195,3 +195,13 @@ MPESA_SHORTCODE = os.getenv('MPESA_SHORTCODE', '')
 MPESA_PASSKEY = os.getenv('MPESA_PASSKEY', '')
 MPESA_CALLBACK_BASE_URL = os.getenv('MPESA_CALLBACK_BASE_URL', '').rstrip('/')
 MPESA_PUBLIC_CERT = os.getenv('MPESA_PUBLIC_CERT', '').strip()
+MPESA_CALLBACK_SECRET = os.getenv('MPESA_CALLBACK_SECRET', '')
+MPESA_REQUEST_TIMEOUT = float(os.getenv('MPESA_REQUEST_TIMEOUT', '15'))
+
+# Backward-compatible aliases for payment gateway settings.
+MPESA_BASE_URL = os.getenv(
+    'MPESA_BASE_URL',
+    'https://sandbox.safaricom.co.ke' if MPESA_ENVIRONMENT == 'sandbox' else 'https://api.safaricom.co.ke',
+)
+MPESA_SHORT_CODE = os.getenv('MPESA_SHORT_CODE', MPESA_SHORTCODE)
+MPESA_CALLBACK_URL = os.getenv('MPESA_CALLBACK_URL', f'{MPESA_CALLBACK_BASE_URL}/api/payments/mpesa/callback/')

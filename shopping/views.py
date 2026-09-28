@@ -7,7 +7,7 @@ from django.db import transaction, IntegrityError
 from django.db.models import Count
 from decimal import Decimal
 
-from authapp.permissions import IsAuthenticated, IsSeller, IsVerifiedUser
+from authapp.permissions import IsAuthenticated, IsBuyer, IsSeller, IsVerifiedUser
 from product_management.models import Product
 
 from payments.models import Wallet
@@ -20,12 +20,21 @@ from payments.services import (
 from notifications.models import NotificationType, create_notification
 
 from .models import Cart, CartItem, Order, OrderItem, OrderStatus, PaymentMethod, PaymentStatus, Wishlist, WishlistItem
-from .serializers import CartSerializer, CartItemSerializer, CreateCheckoutSerializer, OrderDetailSerializer, OrderStatusUpdateSerializer, WishlistSerializer, WishlistItemSerializer
+from .serializers import (
+    CartSerializer,
+    CartItemSerializer,
+    CreateCheckoutSerializer,
+    OrderDetailSerializer,
+    OrderStatusUpdateSerializer,
+    SellerOrderDetailSerializer,
+    WishlistSerializer,
+    WishlistItemSerializer,
+)
 
 
 class CartDetailView(generics.GenericAPIView):
     serializer_class = CartSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsBuyer]
 
     def get_object(self):
         cart, _ = Cart.objects.get_or_create(buyer=self.request.user)
@@ -39,7 +48,7 @@ class CartDetailView(generics.GenericAPIView):
 
 class CartItemListCreateView(generics.ListCreateAPIView):
     serializer_class = CartItemSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsBuyer]
 
     def get_queryset(self):
         cart, _ = Cart.objects.get_or_create(buyer=self.request.user)
@@ -53,6 +62,8 @@ class CartItemListCreateView(generics.ListCreateAPIView):
             quantity = int(request.data.get('quantity', 1))
         except (ValueError, TypeError):
             raise ValidationError({'quantity': 'Quantity must be an integer.'})
+        if quantity < 1:
+            raise ValidationError({'quantity': 'Quantity must be at least 1.'})
 
         try:
             product = Product.objects.get(id=product_id)
@@ -83,7 +94,7 @@ class CartItemListCreateView(generics.ListCreateAPIView):
 
 class CartItemDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = CartItemSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsBuyer]
     lookup_field = 'pk'
 
     def get_queryset(self):
@@ -102,7 +113,7 @@ class CartItemDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 class CheckoutView(generics.GenericAPIView):
     serializer_class = CreateCheckoutSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsBuyer]
 
     def post(self, request, *args, **kwargs):
         """Atomic checkout transaction: validate cart, lock stock, create order, clear cart."""
@@ -240,7 +251,7 @@ class OrderListView(generics.ListAPIView):
 
 class SellerOrderListView(generics.ListAPIView):
     """Lists all orders that contain items sold by the requesting seller."""
-    serializer_class = OrderDetailSerializer
+    serializer_class = SellerOrderDetailSerializer
     permission_classes = [IsSeller, IsVerifiedUser]
 
     def get_queryset(self):
@@ -248,6 +259,18 @@ class SellerOrderListView(generics.ListAPIView):
         return Order.objects.filter(id__in=order_ids).annotate(
             seller_count=Count('items__seller', distinct=True),
         ).filter(seller_count=1).prefetch_related('items').order_by('-created_at')
+
+
+class SellerOrderDetailView(generics.RetrieveAPIView):
+    serializer_class = SellerOrderDetailSerializer
+    permission_classes = [IsSeller, IsVerifiedUser]
+    lookup_field = 'pk'
+
+    def get_queryset(self):
+        order_ids = OrderItem.objects.filter(seller=self.request.user).values_list('order_id', flat=True)
+        return Order.objects.filter(id__in=order_ids).annotate(
+            seller_count=Count('items__seller', distinct=True),
+        ).filter(seller_count=1).prefetch_related('items')
 
 
 class SellerOrderStatusUpdateView(generics.UpdateAPIView):
@@ -330,6 +353,10 @@ class SellerOrderStatusUpdateView(generics.UpdateAPIView):
                     message=f'Your order {order.id} has been cancelled and any escrow is being released.',
                     notification_type=NotificationType.ORDER,
                 )
+
+
+class SellerOrderStatusView(SellerOrderStatusUpdateView):
+    serializer_class = OrderStatusUpdateSerializer
 
 
 class OrderDeliveryConfirmationView(generics.GenericAPIView):
