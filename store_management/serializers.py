@@ -1,6 +1,8 @@
+from django.core.files.uploadedfile import UploadedFile
+from django.db.models.fields.files import FieldFile
 from rest_framework import serializers
 
-from .models import Store, StoreKYC, StoreKYCStatus
+from .models import Store, StoreKYC, StoreKYCDocumentType, StoreKYCStatus
 
 
 class StoreSerializer(serializers.ModelSerializer):
@@ -21,11 +23,20 @@ class StoreSerializer(serializers.ModelSerializer):
             'city',
             'country',
             'country_code',
+			'logo',
+			'banner',
+			'average_rating',
+			'total_reviews',
+			'total_orders',
+			'total_products',
             'status',
             'created_at',
             'updated_at',
         ]
-        read_only_fields = ['id', 'owner', 'status', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id', 'owner', 'status', 'average_rating', 'total_reviews', 'total_orders',
+            'total_products', 'created_at', 'updated_at',
+        ]
 
 
 class StoreKYCSerializer(serializers.ModelSerializer):
@@ -40,6 +51,8 @@ class StoreKYCSerializer(serializers.ModelSerializer):
             'business_name',
             'business_registration_number',
             'tax_identification_number',
+			'document_type',
+			'document',
             'status',
             'submitted_at',
             'reviewed_at',
@@ -59,6 +72,30 @@ class StoreKYCSerializer(serializers.ModelSerializer):
             'created_at',
             'updated_at',
         ]
+
+    def validate(self, attrs):
+        existing_document = getattr(self.instance, 'document', None)
+        document = attrs.get('document', existing_document)
+
+        if not attrs.get('document') and existing_document and self.instance and self.instance.status == StoreKYCStatus.REJECTED:
+            document = existing_document
+            attrs['document'] = document
+
+        if existing_document and (
+            document is None
+            or isinstance(document, str)
+            or not isinstance(document, (UploadedFile, FieldFile))
+        ):
+            document = existing_document
+            attrs['document'] = document
+
+        if not document and not existing_document:
+            raise serializers.ValidationError({'document': 'A verification document is required.'})
+
+        document_type = attrs.get('document_type', getattr(self.instance, 'document_type', ''))
+        if not document_type:
+            raise serializers.ValidationError({'document_type': 'Document type is required.'})
+        return attrs
 
 
 class StoreKYCReviewSerializer(serializers.Serializer):

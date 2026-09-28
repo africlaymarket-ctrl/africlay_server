@@ -1,4 +1,4 @@
-.PHONY: help sync runserver makemigrations makemigrations-all migrate migrate-all createsuperuser shell test \
+.PHONY: help sync runserver makemigrations makemigrations-all migrate migrate-all createsuperuser shell test smoke-api \
         docker-up docker-up-build docker-up-d docker-down docker-down-v docker-build docker-logs \
         docker-migrate docker-makemigrations docker-createsuperuser docker-shell docker-db docker-pgadmin
 
@@ -13,6 +13,7 @@ help:
 	@echo "    make createsuperuser       - Create an admin superuser"
 	@echo "    make shell                 - Open Django interactive shell"
 	@echo "    make test                  - Run Django test suite"
+	@echo "    make smoke-api             - Exercise core API endpoints against the persistent database"
 	@echo ""
 	@echo "  Docker Compose:"
 	@echo "    make docker-up             - Start all containers (attached)"
@@ -60,6 +61,9 @@ shell:
 
 test:
 	uv run python manage.py test
+
+smoke-api:
+	uv run python manage.py smoke_api
 
 # ==============================================================================
 # Docker Compose Commands

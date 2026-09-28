@@ -12,8 +12,13 @@ urlpatterns = [
     path('api/auth/', include('authapp.urls', namespace='authapp')),
     path('api/stores/', include('store_management.urls', namespace='store_management')),
     path('api/products/', include('product_management.urls', namespace='product_management')),
+    path('api/services/', include('service_management.urls', namespace='service_management')),
     path('api/cart/', include('shopping.urls', namespace='shopping')),
     path('api/payments/', include('payments.urls', namespace='payments')),
+    path('api/common/', include('utility_services.urls', namespace='utility_services')),
+    path('api/messages/', include('messaging.urls', namespace='messages')),
+    path('api/notifications/', include('notifications.urls', namespace='notifications')),
+    path('api/reviews/', include('reviews.urls', namespace='reviews')),
 
     # DRF Spectacular OpenAPI & API Docs
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),

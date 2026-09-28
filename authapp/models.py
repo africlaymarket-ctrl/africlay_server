@@ -3,7 +3,7 @@ from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
 from django.utils import timezone
 
-from core.models import TimestampedModel
+from core.models import TimestampedModel, avatar_upload_path, validate_image_upload
 
 
 class UserRole(models.TextChoices):
@@ -97,7 +97,7 @@ class UserProfile(TimestampedModel):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
     first_name = models.CharField(max_length=150, blank=True, default='')
     last_name = models.CharField(max_length=150, blank=True, default='')
-    avatar = models.ImageField(upload_to='avatars/', blank=True, null=True)
+    avatar = models.ImageField(upload_to=avatar_upload_path, blank=True, null=True, validators=[validate_image_upload])
     avatar_url = models.URLField(blank=True, null=True)
     bio = models.TextField(blank=True, null=True)
     notification_preferences = models.JSONField(default=dict, blank=True)

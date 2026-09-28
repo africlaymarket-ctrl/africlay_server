@@ -1,5 +1,8 @@
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
+from django.core.files.uploadedfile import UploadedFile
+from django.core.files.storage import default_storage
+from django.db.models.fields.files import FieldFile
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -78,6 +81,7 @@ class StoreKYCSubmitView(generics.CreateAPIView):
     permission_classes = [IsSeller, IsVerifiedUser]
 
     def create(self, request, *args, **kwargs):
+        previous_document_name = None
         with transaction.atomic():
             try:
                 store = Store.objects.select_for_update().get(slug=self.kwargs['slug'], owner=request.user)
@@ -88,7 +92,20 @@ class StoreKYCSubmitView(generics.CreateAPIView):
             if existing and existing.status in [StoreKYCStatus.PENDING, StoreKYCStatus.APPROVED]:
                 raise ValidationError({'kyc': 'This store already has an active KYC submission.'})
 
-            serializer = self.get_serializer(instance=existing, data=request.data)
+            if existing and existing.document:
+                previous_document_name = existing.document.name
+
+            payload = request.data.copy() if hasattr(request.data, 'copy') else request.data
+            if existing and existing.status == StoreKYCStatus.REJECTED:
+                raw_document = payload.get('document')
+                if raw_document in (None, '', 'null') or not isinstance(raw_document, (UploadedFile, FieldFile, type(None))):
+                    payload.pop('document', None)
+
+                if 'document' not in payload and existing.document:
+                    payload['document'] = existing.document
+
+            partial = bool(existing and existing.status == StoreKYCStatus.REJECTED)
+            serializer = self.get_serializer(instance=existing, data=payload, partial=partial)
             serializer.is_valid(raise_exception=True)
             serializer.save(
                 store=store,
@@ -98,6 +115,9 @@ class StoreKYCSubmitView(generics.CreateAPIView):
                 reviewed_by=None,
                 rejection_reason='',
             )
+
+        if previous_document_name and serializer.instance.document.name != previous_document_name:
+            default_storage.delete(previous_document_name)
         return Response(
             serializer.data,
             status=status.HTTP_200_OK if existing else status.HTTP_201_CREATED,

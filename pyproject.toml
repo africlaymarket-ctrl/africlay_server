@@ -10,9 +10,12 @@ dependencies = [
     "djangorestframework-simplejwt>=5.5.1",
     "drf-spectacular>=0.30.0",
     "drf-spectacular-sidecar>=2026.8.1",
+    "django-cors-headers>=4.7.0",
+    "django-storages[google]>=1.14.6",
     "pillow>=12.3.0",
     "psycopg[binary]>=3.3.4",
     "pyjwt==2.10.1",
     "python-dotenv>=1.2.3",
     "requests>=2.34.2",
+    "gunicorn>=23.0.0",
 ]
