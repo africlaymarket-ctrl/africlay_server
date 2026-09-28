@@ -44,8 +44,8 @@ COPY --from=builder /opt/venv /opt/venv
 # Copy application code
 COPY . /app
 
-# Expose the Django default port
+# Render sets PORT at runtime. Keep 8000 as a fallback for local Docker use.
 EXPOSE 8000
 
-# Run Django development server listening on all interfaces
-CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+# Run the production WSGI server and honor the platform-provided port.
+CMD ["sh", "-c", "exec gunicorn africlay_server.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 2 --timeout 120"]
