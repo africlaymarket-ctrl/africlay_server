@@ -55,7 +55,7 @@ class Migration(migrations.Migration):
                 ('order', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='payments', to='shopping.order')),
             ],
             options={
-                'indexes': [models.Index(fields=['order', 'status'])],
+                'indexes': [models.Index(fields=['order', 'status'], name='payments_pa_order_i_a76289_idx')],
                 'constraints': [models.UniqueConstraint(condition=Q(('checkout_request_id__gt', '')), fields=('provider', 'checkout_request_id'), name='unique_payment_provider_checkout')],
             },
         ),
@@ -97,7 +97,7 @@ class Migration(migrations.Migration):
             ],
             options={
                 'ordering': ['-created_at'],
-                'indexes': [models.Index(fields=['status', 'created_at'])],
+                'indexes': [models.Index(fields=['status', 'created_at'], name='payments_pa_status_f4857f_idx')],
             },
         ),
         migrations.AddConstraint(

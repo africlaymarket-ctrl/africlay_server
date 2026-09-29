@@ -110,7 +110,7 @@ class PaymentAttempt(TimestampedModel):
             ),
             models.CheckConstraint(condition=models.Q(amount__gte=1), name='payment_attempt_amount_minimum'),
         ]
-        indexes = [models.Index(fields=['status', 'created_at'])]
+        indexes = [models.Index(fields=['status', 'created_at'], name='payments_pa_status_f4857f_idx')]
         ordering = ['-created_at']
 
     def __str__(self):
@@ -143,7 +143,7 @@ class Payment(models.Model):
                 name='unique_payment_provider_checkout',
             ),
         ]
-        indexes = [models.Index(fields=['order', 'status'])]
+        indexes = [models.Index(fields=['order', 'status'], name='payments_pa_order_i_a76289_idx')]
 
     def __str__(self):
         return f'{self.provider} payment for order {self.order_id}'
