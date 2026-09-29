@@ -1,13 +1,10 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model, authenticate
 from django.contrib.auth.password_validation import validate_password
-from django.utils import timezone
 from .models import UserProfile, UserAddress, OTPVerification, OTPType, UserRole
 from .utils import (
     generate_access_token,
     generate_refresh_token,
-    generate_otp_code,
-    send_otp_email,
     refresh_access_token,
     blacklist_token,
 )
@@ -135,7 +132,7 @@ class UserRegistrationSerializer(serializers.Serializer):
             password=password,
             role=role,
             phone_number=phone_number,
-            is_verified=False,
+            is_verified=True,
         )
 
         # Update profile with names
@@ -143,16 +140,6 @@ class UserRegistrationSerializer(serializers.Serializer):
         profile.first_name = first_name
         profile.last_name = last_name
         profile.save()
-
-        # Generate and dispatch Email Verification OTP
-        otp_code = generate_otp_code()
-        OTPVerification.objects.create(
-            user=user,
-            otp_code=otp_code,
-            otp_type=OTPType.EMAIL_VERIFICATION,
-            expires_at=timezone.now() + timezone.timedelta(minutes=15),
-        )
-        send_otp_email(user, otp_code, OTPType.EMAIL_VERIFICATION)
 
         return user
 

@@ -41,12 +41,12 @@ User = get_user_model()
 @extend_schema(
     tags=['Authentication'],
     summary='Register a new user account',
-    description='Creates a new user with the specified role (buyer/seller/both) and automatically sends an email verification OTP code.',
+    description='Creates a new user with the specified role (buyer/seller/both). The account is available immediately.',
     request=UserRegistrationSerializer,
     responses={
         201: OpenApiResponse(
             response=MessageResponseSerializer,
-            description='User registered successfully. Verification code sent to email.',
+            description='User registered successfully.',
         ),
         400: OpenApiResponse(description='Validation error / email already exists'),
     },
@@ -63,7 +63,7 @@ class RegisterView(generics.CreateAPIView):
 
         return Response(
             {
-                'message': 'Registration successful! A 6-digit verification code has been sent to your email.',
+                'message': 'Registration successful. Your account is ready.',
                 'user': UserSummarySerializer(user).data,
             },
             status=status.HTTP_201_CREATED,

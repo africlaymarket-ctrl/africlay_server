@@ -77,16 +77,16 @@ class AuthTestCase(TestCase):
         }
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['message'], 'Registration successful. Your account is ready.')
 
         user = User.objects.filter(email='newuser@example.com').first()
         self.assertIsNotNone(user)
-        self.assertFalse(user.is_verified)
+        self.assertTrue(user.is_verified)
         self.assertEqual(user.profile.first_name, 'Jane')
 
-        # Verify OTP was generated
-        otp = OTPVerification.objects.filter(user=user, otp_type=OTPType.EMAIL_VERIFICATION).first()
-        self.assertIsNotNone(otp)
-        self.assertEqual(len(otp.otp_code), 6)
+        self.assertFalse(
+            OTPVerification.objects.filter(user=user, otp_type=OTPType.EMAIL_VERIFICATION).exists()
+        )
 
     def test_verify_email_otp(self):
         """Test POST /api/auth/verify-email/ validates OTP and activates user."""
