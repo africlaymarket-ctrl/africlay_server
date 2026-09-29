@@ -51,4 +51,4 @@ COPY . /app
 EXPOSE 8000
 
 # Run the production WSGI server and honor the platform-provided port.
-CMD ["sh", "-c", "exec /opt/venv/bin/gunicorn africlay_server.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 2 --timeout 120"]
+CMD ["sh", "-c", "/opt/venv/bin/python manage.py migrate --noinput && exec /opt/venv/bin/gunicorn africlay_server.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 2 --timeout 120"]
