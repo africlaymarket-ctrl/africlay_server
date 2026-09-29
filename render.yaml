@@ -7,8 +7,7 @@ services:
     buildCommand: |
       pip install uv
       uv sync --frozen --no-install-project
-    startCommand: |
-      gunicorn africlay_server.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    startCommand: python manage.py migrate --noinput && gunicorn africlay_server.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --timeout 120
     healthCheckPath: /api/schema/
     envVars:
       - key: PYTHON_VERSION
