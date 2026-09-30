@@ -26,7 +26,7 @@ class StoreAdmin(admin.ModelAdmin):
 
 	@staticmethod
 	def _is_reviewer(request):
-		return request.user.role in [UserRole.ADMIN, UserRole.SUPER_ADMIN]
+		return request.user.is_authenticated and request.user.role in [UserRole.ADMIN, UserRole.SUPER_ADMIN]
 
 
 @admin.register(StoreKYC)
@@ -65,4 +65,4 @@ class StoreKYCAdmin(admin.ModelAdmin):
 
 	@staticmethod
 	def _is_reviewer(request):
-		return request.user.role in [UserRole.ADMIN, UserRole.SUPER_ADMIN]
+		return request.user.is_authenticated and request.user.role in [UserRole.ADMIN, UserRole.SUPER_ADMIN]
