@@ -6,7 +6,7 @@ services:
     region: oregon
     buildCommand: |
       pip install uv
-      uv sync --frozen --no-install-project
+      uv sync --no-install-project
     startCommand: python manage.py migrate --noinput && gunicorn africlay_server.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --timeout 120
     healthCheckPath: /api/schema/
     envVars:
@@ -28,12 +28,18 @@ services:
         value: "true"
       - key: CSRF_COOKIE_SECURE
         value: "true"
-      - key: GS_BUCKET_NAME
-        value: ""
-      - key: GS_PROJECT_ID
-        value: ""
-      - key: GS_CREDENTIALS_FILE
-        value: ""
+      - key: SUPABASE_STORAGE_BUCKET
+        sync: false
+      - key: SUPABASE_S3_ENDPOINT_URL
+        sync: false
+      - key: SUPABASE_S3_REGION
+        sync: false
+      - key: SUPABASE_S3_ACCESS_KEY_ID
+        sync: false
+      - key: SUPABASE_S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: SUPABASE_SIGNED_URL_TTL
+        value: "3600"
       - key: DB_ENGINE
         value: django.db.backends.postgresql
       - key: DB_NAME

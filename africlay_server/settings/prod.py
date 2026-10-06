@@ -12,8 +12,10 @@ from .base import *
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = False
 
-if not GS_BUCKET_NAME:
-    GS_BUCKET_NAME = ''
+if not SUPABASE_STORAGE_BUCKET:
+    raise ImproperlyConfigured(
+        'SUPABASE_STORAGE_BUCKET must be configured in production so uploaded media is persisted and served.'
+    )
 
 ALLOWED_HOSTS = [
     host.strip()

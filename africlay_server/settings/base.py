@@ -8,6 +8,7 @@ Environment-specific settings are defined in local.py, dev.py, and prod.py.
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -171,24 +172,40 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
-# Google Cloud Storage is opt-in locally and mandatory in deployed environments.
-# Files are private and served through signed URLs when GCS is enabled.
-GS_BUCKET_NAME = os.getenv('GS_BUCKET_NAME', '')
-GS_PROJECT_ID = os.getenv('GS_PROJECT_ID', '')
-GS_CREDENTIALS_FILE = os.getenv('GS_CREDENTIALS_FILE', '')
-GS_CREDENTIALS = None
-GS_DEFAULT_ACL = None
-GS_QUERYSTRING_AUTH = True
-GS_FILE_OVERWRITE = False
+# Supabase Storage S3 credentials are server-side only. A private bucket keeps
+# KYC documents protected; Django returns temporary signed URLs for media.
+SUPABASE_STORAGE_BUCKET = os.getenv('SUPABASE_STORAGE_BUCKET', '').strip()
+SUPABASE_S3_ENDPOINT_URL = os.getenv('SUPABASE_S3_ENDPOINT_URL', '').strip().rstrip('/')
+SUPABASE_S3_REGION = os.getenv('SUPABASE_S3_REGION', '').strip()
+SUPABASE_S3_ACCESS_KEY_ID = os.getenv('SUPABASE_S3_ACCESS_KEY_ID', '').strip()
+SUPABASE_S3_SECRET_ACCESS_KEY = os.getenv('SUPABASE_S3_SECRET_ACCESS_KEY', '').strip()
 
-if GS_BUCKET_NAME:
-    if GS_CREDENTIALS_FILE:
-        from google.oauth2 import service_account
-        GS_CREDENTIALS = service_account.Credentials.from_service_account_file(GS_CREDENTIALS_FILE)
+if SUPABASE_STORAGE_BUCKET:
+    _supabase_s3_missing = [
+        name for name, value in (
+            ('SUPABASE_S3_ENDPOINT_URL', SUPABASE_S3_ENDPOINT_URL),
+            ('SUPABASE_S3_REGION', SUPABASE_S3_REGION),
+            ('SUPABASE_S3_ACCESS_KEY_ID', SUPABASE_S3_ACCESS_KEY_ID),
+            ('SUPABASE_S3_SECRET_ACCESS_KEY', SUPABASE_S3_SECRET_ACCESS_KEY),
+        ) if not value
+    ]
+    if _supabase_s3_missing:
+        raise ImproperlyConfigured('Supabase Storage is partially configured; missing: ' + ', '.join(_supabase_s3_missing))
     STORAGES = {
-        'default': {'BACKEND': 'storages.backends.gcloud.GoogleCloudStorage'},
+        'default': {'BACKEND': 'storages.backends.s3.S3Storage'},
         'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
     }
+    AWS_STORAGE_BUCKET_NAME = SUPABASE_STORAGE_BUCKET
+    AWS_S3_ENDPOINT_URL = SUPABASE_S3_ENDPOINT_URL
+    AWS_S3_REGION_NAME = SUPABASE_S3_REGION
+    AWS_ACCESS_KEY_ID = SUPABASE_S3_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY = SUPABASE_S3_SECRET_ACCESS_KEY
+    AWS_S3_ADDRESSING_STYLE = 'path'
+    AWS_S3_SIGNATURE_VERSION = 's3v4'
+    AWS_DEFAULT_ACL = None
+    AWS_QUERYSTRING_AUTH = True
+    AWS_QUERYSTRING_EXPIRE = int(os.getenv('SUPABASE_SIGNED_URL_TTL', '3600'))
+    AWS_S3_FILE_OVERWRITE = False
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

@@ -18,6 +18,7 @@ from product_management.models import Product
 from shopping.models import Cart, CartItem, Order, OrderStatus
 from store_management.models import Store
 
+from payments.gateways.mpesa import MpesaGateway
 from payments.models import PaymentAttempt, Wallet, WalletTransaction
 from payments.services import (
     WalletOperationError,
@@ -30,6 +31,44 @@ from payments.services import (
 )
 
 from .models import Payment, PaymentStatus
+
+
+class MpesaGatewayTests(TestCase):
+    @override_settings(
+        MPESA_BASE_URL='https://sandbox.safaricom.co.ke',
+        MPESA_CONSUMER_KEY='consumer-key',
+        MPESA_CONSUMER_SECRET='consumer-secret',
+        MPESA_SHORTCODE='174379',
+        MPESA_PASSKEY='passkey',
+        MPESA_CALLBACK_BASE_URL='https://www.africlaymarket.com',
+        MPESA_CALLBACK_SECRET='callback-secret',
+        MPESA_CALLBACK_URL='',
+        MPESA_REQUEST_TIMEOUT=10,
+    )
+    @patch('payments.gateways.mpesa.requests.post')
+    @patch('payments.gateways.mpesa.requests.get')
+    def test_initiate_payment_uses_access_token_and_secret_callback_url(self, get, post):
+        get.return_value.json.return_value = {'access_token': 'generated-token'}
+        post.return_value.json.return_value = {
+            'MerchantRequestID': 'merchant-id',
+            'CheckoutRequestID': 'checkout-id',
+        }
+
+        result = MpesaGateway().initiate_payment(
+            phone_number='254712345678',
+            amount=Decimal('100.00'),
+            account_reference='order-id',
+        )
+
+        self.assertEqual(result['CheckoutRequestID'], 'checkout-id')
+        self.assertEqual(
+            post.call_args.kwargs['headers']['Authorization'],
+            'Bearer generated-token',
+        )
+        self.assertEqual(
+            post.call_args.kwargs['json']['CallBackURL'],
+            'https://www.africlaymarket.com/api/payments/mpesa/callback/?token=callback-secret',
+        )
 
 
 class WalletApiTests(TestCase):

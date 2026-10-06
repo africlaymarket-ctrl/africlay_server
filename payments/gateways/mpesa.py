@@ -1,6 +1,7 @@
 import base64
 import json
 from datetime import datetime
+from urllib.parse import urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 import requests
@@ -131,7 +132,10 @@ class MpesaGateway:
         self.consumer_secret = settings.MPESA_CONSUMER_SECRET
         self.short_code = getattr(settings, 'MPESA_SHORT_CODE', '') or settings.MPESA_SHORTCODE
         self.passkey = settings.MPESA_PASSKEY
-        self.callback_url = getattr(settings, 'MPESA_CALLBACK_URL', '')
+        callback_url = getattr(settings, 'MPESA_CALLBACK_URL', '')
+        if not callback_url:
+            callback_url = f'{settings.MPESA_CALLBACK_BASE_URL}/api/payments/mpesa/callback/'
+        self.callback_url = callback_url
         self.timeout = getattr(settings, 'MPESA_REQUEST_TIMEOUT', 15)
 
     def initiate_payment(self, *, phone_number, amount, account_reference):
@@ -145,9 +149,29 @@ class MpesaGateway:
         access_token = token_response.json()['access_token']
         timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
         password = base64.b64encode(f'{self.short_code}{self.passkey}{timestamp}'.encode()).decode()
+        callback_parts = urlsplit(self.callback_url)
+        callback_url = urlunsplit(
+            (
+                callback_parts.scheme,
+                callback_parts.netloc,
+                callback_parts.path,
+                urlencode({'token': settings.MPESA_CALLBACK_SECRET}),
+                '',
+            )
+        )
+        if not callback_parts.scheme or not callback_parts.netloc:
+            callback_url = urlunsplit(
+                (
+                    '',
+                    '',
+                    callback_parts.path,
+                    urlencode({'token': settings.MPESA_CALLBACK_SECRET}),
+                    '',
+                )
+            )
         response = requests.post(
             f'{self.base_url}/mpesa/stkpush/v1/processrequest',
-            headers={'Authorization': f'******'},
+            headers={'Authorization': f'Bearer {access_token}'},
             json={
                 'BusinessShortCode': self.short_code,
                 'Password': password,
@@ -157,7 +181,7 @@ class MpesaGateway:
                 'PartyA': phone_number,
                 'PartyB': self.short_code,
                 'PhoneNumber': phone_number,
-                'CallBackURL': self.callback_url,
+                'CallBackURL': callback_url,
                 'AccountReference': account_reference,
                 'TransactionDesc': 'Africlay order payment',
             },

@@ -120,8 +120,11 @@ class CheckoutView(generics.GenericAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         payment_method = serializer.validated_data.get('payment_method', '')
-        if payment_method and payment_method != PaymentMethod.WALLET:
-            raise ValidationError({'payment_method': 'This payment provider is not configured.'})
+        if payment_method and payment_method not in {
+            PaymentMethod.WALLET,
+            PaymentMethod.MPESA,
+        }:
+            raise ValidationError({'payment_method': 'This payment provider is not implemented.'})
 
         buyer = request.user
 

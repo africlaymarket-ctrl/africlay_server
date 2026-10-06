@@ -332,6 +332,31 @@ class CheckoutApiTests(TestCase):
         cart_response = self.client.get(reverse('shopping:cart-detail'))
         self.assertEqual(len(cart_response.data['items']), 0)
 
+    def test_mpesa_checkout_creates_pending_order(self):
+        self.authenticate_as(self.buyer)
+        self.client.post(
+            reverse('shopping:cart-item-list'),
+            {'product': str(self.product.id), 'quantity': 1},
+            format='json',
+        )
+
+        response = self.client.post(
+            reverse('shopping:checkout'),
+            {
+                'shipping_address': '123 Main St',
+                'shipping_city': 'Nairobi',
+                'shipping_postal_code': '00100',
+                'shipping_country': 'Kenya',
+                'payment_method': 'mpesa',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['status'], 'pending')
+        self.assertEqual(response.data['payment_method'], 'mpesa')
+        self.assertEqual(response.data['payment_status'], 'pending')
+
     def test_wallet_checkout_places_funds_on_hold(self):
         self.authenticate_as(self.buyer)
         wallet = Wallet.objects.create(user=self.buyer, currency='KES')
