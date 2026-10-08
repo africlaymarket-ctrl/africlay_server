@@ -4,7 +4,11 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from shopping.models import OrderStatus
+from shopping.models import (
+    OrderStatus,
+    PaymentMethod as OrderPaymentMethod,
+    PaymentStatus as OrderPaymentStatus,
+)
 
 from .models import Payment, PaymentStatus, Wallet, WalletTransaction, WalletTransactionType
 
@@ -248,7 +252,9 @@ class PaymentService:
             payment.completed_at = timezone.now()
             if payment.order.status == OrderStatus.PENDING:
                 payment.order.status = OrderStatus.PROCESSING
-                payment.order.save(update_fields=['status', 'updated_at'])
+                payment.order.payment_method = OrderPaymentMethod.MPESA
+                payment.order.payment_status = OrderPaymentStatus.PAID
+                payment.order.save(update_fields=['status', 'payment_method', 'payment_status', 'updated_at'])
         else:
             payment.status = PaymentStatus.FAILED
             payment.failure_code = str(result_code or '')

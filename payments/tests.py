@@ -15,12 +15,20 @@ from rest_framework.test import APIClient
 from authapp.models import UserRole
 from authapp.utils import generate_access_token
 from product_management.models import Product
-from shopping.models import Cart, CartItem, Order, OrderStatus
+from shopping.models import (
+    Cart,
+    CartItem,
+    Order,
+    OrderStatus,
+    PaymentMethod as OrderPaymentMethod,
+    PaymentStatus as OrderPaymentStatus,
+)
 from store_management.models import Store
 
 from payments.gateways.mpesa import MpesaGateway
 from payments.models import PaymentAttempt, Wallet, WalletTransaction
 from payments.services import (
+    PaymentService,
     WalletOperationError,
     capture_escrow_hold,
     credit_wallet,
@@ -448,6 +456,36 @@ class PaymentApiTests(TestCase):
     def authenticate(self):
         token = generate_access_token(self.buyer)
         self.client.credentials(HTTP_AUTHORIZATION=f'******')
+
+    def test_successful_order_payment_updates_order_payment_state(self):
+        payment = Payment.objects.create(
+            order=self.order,
+            provider='mpesa',
+            status=PaymentStatus.PENDING,
+            amount=self.order.total_amount,
+            currency='KES',
+            checkout_request_id='checkout-order-state',
+            merchant_request_id='merchant-order-state',
+            phone_number='254712345678',
+        )
+        payload = {
+            'Body': {'stkCallback': {
+                'CheckoutRequestID': payment.checkout_request_id,
+                'ResultCode': 0,
+                'ResultDesc': 'Processed successfully.',
+                'CallbackMetadata': {'Item': [
+                    {'Name': 'Amount', 'Value': 200},
+                    {'Name': 'MpesaReceiptNumber', 'Value': 'ORDERSTATE123'},
+                ]},
+            }},
+        }
+
+        PaymentService.process_mpesa_callback(payload)
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, OrderStatus.PROCESSING)
+        self.assertEqual(self.order.payment_method, OrderPaymentMethod.MPESA)
+        self.assertEqual(self.order.payment_status, OrderPaymentStatus.PAID)
 
     @patch('payments.gateways.mpesa.MpesaGateway.initiate_payment')
     def test_buyer_can_initiate_payment_for_pending_order(self, initiate_payment):

@@ -76,6 +76,15 @@ class CartApiTests(TestCase):
         self.assertEqual(response.data['buyer'], str(self.buyer.id))
         self.assertEqual(response.data['items'], [])
 
+    def test_seller_can_retrieve_a_buyer_cart(self):
+        self.authenticate_as(self.seller)
+
+        response = self.client.get(reverse('shopping:cart-detail'))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['buyer'], str(self.seller.id))
+        self.assertEqual(response.data['items'], [])
+
     def test_buyer_can_add_product_to_cart(self):
         self.authenticate_as(self.buyer)
 

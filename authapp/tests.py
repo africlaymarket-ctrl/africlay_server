@@ -37,6 +37,17 @@ class AuthTestCase(TestCase):
         self.assertEqual(self.user.full_name, 'John Doe')
         self.assertTrue(self.user.is_buyer)
 
+    def test_seller_accounts_can_also_buy(self):
+        seller = User.objects.create_user(
+            email='seller-buyer@example.com',
+            password='StrongPassword123!',
+            role=UserRole.SELLER,
+            is_verified=True,
+        )
+
+        self.assertTrue(seller.is_seller)
+        self.assertTrue(seller.is_buyer)
+
     def test_user_uses_shared_timestamp_fields(self):
         """All timestamped models expose the shared creation/update contract."""
         created_at = self.user.created_at

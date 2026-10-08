@@ -81,7 +81,13 @@ class User(TimestampedModel, AbstractBaseUser, PermissionsMixin):
 
     @property
     def is_buyer(self):
-        return self.role in [UserRole.BUYER, UserRole.BOTH, UserRole.ADMIN, UserRole.SUPER_ADMIN]
+        return self.role in [
+            UserRole.BUYER,
+            UserRole.SELLER,
+            UserRole.BOTH,
+            UserRole.ADMIN,
+            UserRole.SUPER_ADMIN,
+        ]
 
     @property
     def is_seller(self):
