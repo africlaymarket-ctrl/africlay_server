@@ -100,7 +100,7 @@ class ProductApiTests(TestCase):
 	def test_public_catalogue_filters_by_category_and_tag_slug(self):
 		self.approve_store_kyc()
 		category = Category.objects.create(name='Ceramics', slug='ceramics')
-		tag = Tag.objects.create(name='Handmade', slug='handmade')
+		tag = Tag.objects.create(name='Studio Made', slug='studio-made')
 		other_tag = Tag.objects.create(name='Decor', slug='decor')
 		self.authenticate_as(self.seller)
 		matching = self.client.post(
@@ -117,7 +117,7 @@ class ProductApiTests(TestCase):
 		self.assertEqual(other.status_code, status.HTTP_201_CREATED)
 
 		self.client.credentials()
-		response = self.client.get(reverse('product_management:product-list'), {'category': 'ceramics', 'tag': 'handmade'})
+		response = self.client.get(reverse('product_management:product-list'), {'category': 'ceramics', 'tag': 'studio-made'})
 
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
 		self.assertEqual([item['slug'] for item in response.data], ['hand-thrown-mug'])
@@ -168,10 +168,11 @@ class ProductApiTests(TestCase):
 		)
 		tag_response = self.client.post(
 			reverse('product_management:tag-list'),
-			{'name': 'Handmade', 'slug': 'handmade'}, format='json',
+			{'name': 'Artisan Finish', 'slug': 'artisan-finish', 'categories': [category_response.data['id']]}, format='json',
 		)
 		self.assertEqual(category_response.status_code, status.HTTP_201_CREATED)
 		self.assertEqual(tag_response.status_code, status.HTTP_201_CREATED)
+		self.assertEqual([str(category_id) for category_id in tag_response.data['categories']], [category_response.data['id']])
 
 		self.authenticate_as(self.seller)
 		response = self.client.post(

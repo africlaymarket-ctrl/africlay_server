@@ -26,6 +26,7 @@ class Tag(TimestampedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=50, unique=True)
     slug = models.SlugField(max_length=60, unique=True)
+    categories = models.ManyToManyField(Category, related_name='suggested_tags', blank=True)
 
     class Meta:
         ordering = ['name']

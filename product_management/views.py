@@ -28,7 +28,7 @@ class CategoryDetailView(generics.RetrieveUpdateAPIView):
 
 
 class TagListCreateView(generics.ListCreateAPIView):
-    queryset = Tag.objects.all()
+    queryset = Tag.objects.prefetch_related('categories')
     serializer_class = TagSerializer
 
     def get_permissions(self):
@@ -36,7 +36,7 @@ class TagListCreateView(generics.ListCreateAPIView):
 
 
 class TagDetailView(generics.RetrieveUpdateAPIView):
-    queryset = Tag.objects.all()
+    queryset = Tag.objects.prefetch_related('categories')
     serializer_class = TagSerializer
 
     def get_permissions(self):
