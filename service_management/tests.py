@@ -16,6 +16,13 @@ from .models import Service
 User = get_user_model()
 
 
+class SchemaApiTests(TestCase):
+    def test_schema_can_be_generated(self):
+        response = APIClient().get(reverse('schema'))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+
 class ServiceApiTests(TestCase):
     def setUp(self):
         self.client = APIClient()

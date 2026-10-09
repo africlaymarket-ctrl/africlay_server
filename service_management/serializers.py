@@ -35,7 +35,7 @@ class ServiceSerializer(serializers.ModelSerializer):
 
 
 class BookingSerializer(serializers.ModelSerializer):
-    customer_id = serializers.UUIDField(source='customer_id', read_only=True)
+    customer_id = serializers.UUIDField(read_only=True)
     service_name = serializers.CharField(source='service.name', read_only=True)
 
     class Meta:
