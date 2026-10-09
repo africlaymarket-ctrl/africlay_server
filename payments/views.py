@@ -5,6 +5,8 @@ from decimal import Decimal, InvalidOperation
 from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema
 from requests import RequestException, Timeout
 from collections.abc import Mapping
 from rest_framework import generics, permissions, status
@@ -151,6 +153,7 @@ class MpesaCallbackView(generics.GenericAPIView):
     authentication_classes = []
     permission_classes = [AllowAny]
 
+    @extend_schema(request=OpenApiTypes.OBJECT, responses=OpenApiTypes.OBJECT)
     def post(self, request, *args, **kwargs):
         if getattr(settings, 'MPESA_PUBLIC_CERT', '').strip() and not validate_callback_signature(request):
             return Response({'ResultCode': 1, 'ResultDesc': 'Invalid callback signature.'}, status=403)
@@ -304,6 +307,7 @@ class PaymentDetailView(generics.RetrieveAPIView):
 class MpesaQueryTokenCallbackView(generics.GenericAPIView):
     permission_classes = [permissions.AllowAny]
 
+    @extend_schema(request=OpenApiTypes.OBJECT, responses=OpenApiTypes.OBJECT)
     def post(self, request, *args, **kwargs):
         callback_secret = getattr(settings, 'MPESA_CALLBACK_SECRET', '')
         if not callback_secret or request.query_params.get('token') != callback_secret:

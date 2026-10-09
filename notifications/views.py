@@ -1,4 +1,6 @@
+from drf_spectacular.utils import extend_schema, inline_serializer
 from rest_framework import generics, status
+from rest_framework import serializers
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -31,6 +33,13 @@ class NotificationDetailView(generics.RetrieveUpdateAPIView):
 class NotificationMarkAllReadView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        request=None,
+        responses=inline_serializer(
+            name='NotificationMarkAllReadResponse',
+            fields={'marked_read': serializers.IntegerField()},
+        ),
+    )
     def post(self, request, *args, **kwargs):
         updated = Notification.objects.filter(user=request.user, is_read=False).update(is_read=True)
         return Response({'marked_read': updated}, status=status.HTTP_200_OK)

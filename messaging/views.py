@@ -1,6 +1,7 @@
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
+from drf_spectacular.utils import extend_schema
 from rest_framework import generics, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -18,11 +19,13 @@ from .serializers import (
 class ConversationListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(responses=ConversationSerializer(many=True))
     def get(self, request, *args, **kwargs):
         conversations = Conversation.objects.filter(Q(buyer=request.user) | Q(seller=request.user)).prefetch_related('messages__sender')
         serializer = ConversationSerializer(conversations, many=True, context={'request': request})
         return Response({'results': serializer.data}, status=status.HTTP_200_OK)
 
+    @extend_schema(request=ConversationCreateSerializer, responses=ConversationSerializer)
     def post(self, request, *args, **kwargs):
         serializer = ConversationCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -57,6 +60,7 @@ class ConversationListCreateView(APIView):
 class ConversationDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(responses=ConversationSerializer)
     def get(self, request, conversation_id, *args, **kwargs):
         conversation = Conversation.objects.filter(
             id=conversation_id,
@@ -74,6 +78,7 @@ class ConversationDetailView(APIView):
 class MessageListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(request=MessageCreateSerializer, responses=MessageSerializer)
     def post(self, request, conversation_id, *args, **kwargs):
         conversation = Conversation.objects.filter(
             id=conversation_id,

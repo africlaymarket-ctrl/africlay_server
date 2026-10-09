@@ -21,6 +21,15 @@ class SchemaApiTests(TestCase):
         response = APIClient().get(reverse('schema'))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        for path in [
+            '/api/messages/conversations/',
+            '/api/messages/conversations/{conversation_id}/',
+            '/api/messages/conversations/{conversation_id}/messages/',
+            '/api/notifications/mark-all-read/',
+            '/api/payments/mpesa/callback/',
+            '/api/payments/mpesa/callback/{token}/',
+        ]:
+            self.assertIn(path, response.data['paths'])
 
 
 class ServiceApiTests(TestCase):
