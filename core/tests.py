@@ -99,6 +99,7 @@ class SupabaseStorageTests(SimpleTestCase):
     @patch('core.storage.requests.post')
     def test_url_returns_signed_supabase_url(self, post):
         response = Mock()
+        response.status_code = 200
         response.json.return_value = {
             'signedURL': '/object/sign/africlay-media/products/example.jpg?token=test',
         }
@@ -112,6 +113,17 @@ class SupabaseStorageTests(SimpleTestCase):
             'africlay-media/products/example.jpg?token=test',
         )
         response.raise_for_status.assert_called_once()
+
+    @patch('core.storage.requests.post')
+    def test_url_returns_empty_string_for_missing_object(self, post):
+        response = Mock(status_code=400)
+        response.json.return_value = {'statusCode': '404', 'code': 'NoSuchKey'}
+        post.return_value = response
+
+        url = self.storage.url('stores/missing-logo.png')
+
+        self.assertEqual(url, '')
+        response.raise_for_status.assert_not_called()
 
     @patch('core.storage.requests.post')
     def test_save_uploads_to_private_bucket(self, post):

@@ -1,3 +1,4 @@
+import logging
 import mimetypes
 from urllib.parse import quote
 
@@ -7,6 +8,9 @@ from django.core.exceptions import ImproperlyConfigured
 from django.core.files.base import ContentFile
 from django.core.files.storage import Storage
 from django.utils.deconstruct import deconstructible
+
+
+logger = logging.getLogger(__name__)
 
 
 @deconstructible
@@ -120,6 +124,9 @@ class SupabaseStorage(Storage):
             json={'expiresIn': settings.SUPABASE_SIGNED_URL_TTL},
             timeout=self.timeout,
         )
+        if self._is_not_found(response):
+            logger.warning('Supabase Storage object is missing: %s', name)
+            return ''
         response.raise_for_status()
         signed_url = response.json().get('signedURL') or response.json().get('signedUrl')
         if not signed_url:
