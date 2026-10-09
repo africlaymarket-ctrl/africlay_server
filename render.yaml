@@ -30,6 +30,10 @@ services:
         value: "true"
       - key: SUPABASE_STORAGE_BUCKET
         sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
       - key: SUPABASE_S3_ENDPOINT_URL
         sync: false
       - key: SUPABASE_S3_REGION

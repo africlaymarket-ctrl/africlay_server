@@ -175,37 +175,53 @@ MEDIA_ROOT = BASE_DIR / 'media'
 # Supabase Storage S3 credentials are server-side only. A private bucket keeps
 # KYC documents protected; Django returns temporary signed URLs for media.
 SUPABASE_STORAGE_BUCKET = os.getenv('SUPABASE_STORAGE_BUCKET', '').strip()
+SUPABASE_URL = os.getenv('SUPABASE_URL', '').strip().rstrip('/')
+SUPABASE_SECRET_KEY = os.getenv('SUPABASE_SECRET_KEY', '').strip()
+SUPABASE_STORAGE_TIMEOUT = float(os.getenv('SUPABASE_STORAGE_TIMEOUT', '20'))
 SUPABASE_S3_ENDPOINT_URL = os.getenv('SUPABASE_S3_ENDPOINT_URL', '').strip().rstrip('/')
 SUPABASE_S3_REGION = os.getenv('SUPABASE_S3_REGION', '').strip()
 SUPABASE_S3_ACCESS_KEY_ID = os.getenv('SUPABASE_S3_ACCESS_KEY_ID', '').strip()
 SUPABASE_S3_SECRET_ACCESS_KEY = os.getenv('SUPABASE_S3_SECRET_ACCESS_KEY', '').strip()
 
 if SUPABASE_STORAGE_BUCKET:
-    _supabase_s3_missing = [
-        name for name, value in (
-            ('SUPABASE_S3_ENDPOINT_URL', SUPABASE_S3_ENDPOINT_URL),
-            ('SUPABASE_S3_REGION', SUPABASE_S3_REGION),
-            ('SUPABASE_S3_ACCESS_KEY_ID', SUPABASE_S3_ACCESS_KEY_ID),
-            ('SUPABASE_S3_SECRET_ACCESS_KEY', SUPABASE_S3_SECRET_ACCESS_KEY),
-        ) if not value
-    ]
-    if _supabase_s3_missing:
-        raise ImproperlyConfigured('Supabase Storage is partially configured; missing: ' + ', '.join(_supabase_s3_missing))
-    STORAGES = {
-        'default': {'BACKEND': 'storages.backends.s3.S3Storage'},
-        'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
-    }
-    AWS_STORAGE_BUCKET_NAME = SUPABASE_STORAGE_BUCKET
-    AWS_S3_ENDPOINT_URL = SUPABASE_S3_ENDPOINT_URL
-    AWS_S3_REGION_NAME = SUPABASE_S3_REGION
-    AWS_ACCESS_KEY_ID = SUPABASE_S3_ACCESS_KEY_ID
-    AWS_SECRET_ACCESS_KEY = SUPABASE_S3_SECRET_ACCESS_KEY
-    AWS_S3_ADDRESSING_STYLE = 'path'
-    AWS_S3_SIGNATURE_VERSION = 's3v4'
-    AWS_DEFAULT_ACL = None
-    AWS_QUERYSTRING_AUTH = True
-    AWS_QUERYSTRING_EXPIRE = int(os.getenv('SUPABASE_SIGNED_URL_TTL', '3600'))
-    AWS_S3_FILE_OVERWRITE = False
+    _supabase_s3_values = (
+        SUPABASE_S3_ENDPOINT_URL,
+        SUPABASE_S3_REGION,
+        SUPABASE_S3_ACCESS_KEY_ID,
+        SUPABASE_S3_SECRET_ACCESS_KEY,
+    )
+    if all(_supabase_s3_values):
+        STORAGES = {
+            'default': {'BACKEND': 'storages.backends.s3.S3Storage'},
+            'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+        }
+        AWS_STORAGE_BUCKET_NAME = SUPABASE_STORAGE_BUCKET
+        AWS_S3_ENDPOINT_URL = SUPABASE_S3_ENDPOINT_URL
+        AWS_S3_REGION_NAME = SUPABASE_S3_REGION
+        AWS_ACCESS_KEY_ID = SUPABASE_S3_ACCESS_KEY_ID
+        AWS_SECRET_ACCESS_KEY = SUPABASE_S3_SECRET_ACCESS_KEY
+        AWS_S3_ADDRESSING_STYLE = 'path'
+        AWS_S3_SIGNATURE_VERSION = 's3v4'
+        AWS_DEFAULT_ACL = None
+        AWS_QUERYSTRING_AUTH = True
+        AWS_QUERYSTRING_EXPIRE = int(os.getenv('SUPABASE_SIGNED_URL_TTL', '3600'))
+        AWS_S3_FILE_OVERWRITE = False
+    elif SUPABASE_URL and SUPABASE_SECRET_KEY:
+        STORAGES = {
+            'default': {'BACKEND': 'core.storage.SupabaseStorage'},
+            'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+        }
+    elif any(_supabase_s3_values):
+        raise ImproperlyConfigured(
+            'Supabase S3 storage is partially configured. Supply all S3 values, '
+            'or use SUPABASE_URL and SUPABASE_SECRET_KEY.'
+        )
+    else:
+        raise ImproperlyConfigured(
+            'Supabase Storage requires either REST API credentials or complete S3 credentials.'
+        )
+
+SUPABASE_SIGNED_URL_TTL = int(os.getenv('SUPABASE_SIGNED_URL_TTL', '3600'))
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
