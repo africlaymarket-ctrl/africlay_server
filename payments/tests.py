@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 from decimal import Decimal
 from unittest.mock import patch
@@ -48,14 +49,14 @@ class MpesaGatewayTests(TestCase):
         MPESA_CONSUMER_SECRET='consumer-secret',
         MPESA_SHORTCODE='174379',
         MPESA_PASSKEY='passkey',
-        MPESA_CALLBACK_BASE_URL='https://www.africlaymarket.com',
+        MPESA_CALLBACK_BASE_URL='https://api.africlaymarket.com',
         MPESA_CALLBACK_SECRET='callback-secret',
         MPESA_CALLBACK_URL='',
         MPESA_REQUEST_TIMEOUT=10,
     )
     @patch('payments.gateways.mpesa.requests.post')
     @patch('payments.gateways.mpesa.requests.get')
-    def test_initiate_payment_uses_access_token_and_secret_callback_url(self, get, post):
+    def test_initiate_payment_uses_access_token_and_per_payment_callback(self, get, post):
         get.return_value.json.return_value = {'access_token': 'generated-token'}
         post.return_value.json.return_value = {
             'MerchantRequestID': 'merchant-id',
@@ -66,6 +67,7 @@ class MpesaGatewayTests(TestCase):
             phone_number='254712345678',
             amount=Decimal('100.00'),
             account_reference='order-id',
+            callback_token='payment-token',
         )
 
         self.assertEqual(result['CheckoutRequestID'], 'checkout-id')
@@ -75,7 +77,7 @@ class MpesaGatewayTests(TestCase):
         )
         self.assertEqual(
             post.call_args.kwargs['json']['CallBackURL'],
-            'https://www.africlaymarket.com/api/payments/mpesa/callback/?token=callback-secret',
+            'https://api.africlaymarket.com/api/payments/provider-callback/payment-token/',
         )
 
 
@@ -426,6 +428,14 @@ class MpesaApiTests(TestCase):
         self.assertEqual(Wallet.objects.get(user=self.user, currency='KES').balance, Decimal('0.00'))
 
 
+@override_settings(
+    MPESA_ENVIRONMENT='sandbox',
+    MPESA_CONSUMER_KEY='consumer-key',
+    MPESA_CONSUMER_SECRET='consumer-secret',
+    MPESA_SHORTCODE='174379',
+    MPESA_PASSKEY='passkey',
+    MPESA_CALLBACK_BASE_URL='https://api.africlaymarket.com',
+)
 class PaymentApiTests(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -455,7 +465,7 @@ class PaymentApiTests(TestCase):
 
     def authenticate(self):
         token = generate_access_token(self.buyer)
-        self.client.credentials(HTTP_AUTHORIZATION=f'******')
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
 
     def test_successful_order_payment_updates_order_payment_state(self):
         payment = Payment.objects.create(
@@ -470,6 +480,7 @@ class PaymentApiTests(TestCase):
         )
         payload = {
             'Body': {'stkCallback': {
+                'MerchantRequestID': payment.merchant_request_id,
                 'CheckoutRequestID': payment.checkout_request_id,
                 'ResultCode': 0,
                 'ResultDesc': 'Processed successfully.',
@@ -502,7 +513,7 @@ class PaymentApiTests(TestCase):
             format='json',
         )
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
         self.assertEqual(response.data['status'], PaymentStatus.PENDING)
         self.assertEqual(response.data['order_id'], str(self.order.id))
         self.assertTrue(Payment.objects.filter(order=self.order).exists())
@@ -553,6 +564,40 @@ class PaymentApiTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         process_callback.assert_called_once()
+
+    @patch('payments.services.PaymentService.process_mpesa_callback')
+    def test_order_callback_requires_its_payment_token(self, process_callback):
+        callback_token = 'per-payment-token'
+        payment = Payment.objects.create(
+            order=self.order,
+            provider='mpesa',
+            status=PaymentStatus.PENDING,
+            amount=self.order.total_amount,
+            currency='KES',
+            merchant_request_id='merchant-token',
+            checkout_request_id='checkout-token',
+            phone_number='254712345678',
+            callback_token_hash=hashlib.sha256(callback_token.encode()).hexdigest(),
+        )
+        process_callback.return_value = payment
+        callback = {
+            'Body': {'stkCallback': {
+                'MerchantRequestID': payment.merchant_request_id,
+                'CheckoutRequestID': payment.checkout_request_id,
+                'ResultCode': 0,
+                'ResultDesc': 'Processed successfully.',
+                'CallbackMetadata': {'Item': []},
+            }},
+        }
+
+        response = self.client.post(
+            reverse('payments:order-provider-callback', args=[callback_token]),
+            callback,
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        process_callback.assert_called_once_with(callback)
 
     def test_payment_status_cannot_be_initiated_for_paid_order(self):
         self.order.status = OrderStatus.PROCESSING

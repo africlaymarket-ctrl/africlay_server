@@ -43,6 +43,8 @@ class CartApiTests(TestCase):
             owner=self.seller,
             name='Test Store',
             slug='test-store',
+            city='Nairobi',
+            country='Kenya',
         )
         self.product = Product.objects.create(
             store=self.store,
@@ -279,6 +281,8 @@ class CheckoutApiTests(TestCase):
             owner=self.seller,
             name='Test Store',
             slug='test-store',
+            city='Nairobi',
+            country='Kenya',
         )
         self.product = Product.objects.create(
             store=self.store,
@@ -331,10 +335,10 @@ class CheckoutApiTests(TestCase):
             format='json',
         )
         
-        # Verify order created with correct total: (1000*2) + (500*1) = 2500
+        # Verify order created with item total plus the Nairobi 0-5 kg delivery rate.
         self.assertEqual(checkout_response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(checkout_response.data['status'], 'pending')
-        self.assertEqual(float(checkout_response.data['total_amount']), 2500.00)
+        self.assertEqual(float(checkout_response.data['total_amount']), 2720.00)
         self.assertEqual(len(checkout_response.data['items']), 2)
         
         # Verify cart is now empty
@@ -393,7 +397,7 @@ class CheckoutApiTests(TestCase):
         self.assertEqual(response.data['payment_status'], 'paid')
         wallet.refresh_from_db()
         self.assertEqual(wallet.balance, Decimal('1500.00'))
-        self.assertEqual(wallet.held_balance, Decimal('1000.00'))
+        self.assertEqual(wallet.held_balance, Decimal('1220.00'))
         self.assertEqual(
             WalletTransaction.objects.filter(wallet=wallet, transaction_type='escrow_hold').count(),
             1,
@@ -458,7 +462,7 @@ class CheckoutApiTests(TestCase):
     def test_buyer_confirms_delivery_and_settles_seller_earnings(self):
         self.authenticate_as(self.buyer)
         buyer_wallet = Wallet.objects.create(user=self.buyer, currency='KES')
-        credit_wallet(buyer_wallet, Decimal('1200.00'), 'provider:delivery-settlement')
+        credit_wallet(buyer_wallet, Decimal('1500.00'), 'provider:delivery-settlement')
         self.client.post(
             reverse('shopping:cart-item-list'),
             {'product': str(self.product.id), 'quantity': 1},
@@ -506,9 +510,9 @@ class CheckoutApiTests(TestCase):
         self.assertEqual(repeated.status_code, status.HTTP_200_OK)
         buyer_wallet.refresh_from_db()
         seller_wallet = Wallet.objects.get(user=self.seller, currency='KES')
-        self.assertEqual(buyer_wallet.balance, Decimal('200.00'))
+        self.assertEqual(buyer_wallet.balance, Decimal('280.00'))
         self.assertEqual(buyer_wallet.held_balance, Decimal('0.00'))
-        self.assertEqual(seller_wallet.balance, Decimal('1000.00'))
+        self.assertEqual(seller_wallet.balance, Decimal('900.00'))
         self.assertEqual(
             WalletTransaction.objects.filter(wallet=seller_wallet, transaction_type='seller_earning').count(),
             1,
@@ -517,7 +521,7 @@ class CheckoutApiTests(TestCase):
     def test_seller_cancellation_releases_escrow_and_restores_stock(self):
         self.authenticate_as(self.buyer)
         buyer_wallet = Wallet.objects.create(user=self.buyer, currency='KES')
-        credit_wallet(buyer_wallet, Decimal('1000.00'), 'provider:seller-cancellation')
+        credit_wallet(buyer_wallet, Decimal('1300.00'), 'provider:seller-cancellation')
         self.client.post(
             reverse('shopping:cart-item-list'),
             {'product': str(self.product.id), 'quantity': 1},
@@ -547,7 +551,7 @@ class CheckoutApiTests(TestCase):
         self.assertEqual(self.buyer.orders.get().payment_status, 'refunded')
         buyer_wallet.refresh_from_db()
         self.product.refresh_from_db()
-        self.assertEqual(buyer_wallet.balance, Decimal('1000.00'))
+        self.assertEqual(buyer_wallet.balance, Decimal('1300.00'))
         self.assertEqual(buyer_wallet.held_balance, Decimal('0.00'))
         self.assertEqual(self.product.stock_quantity, 10)
 
@@ -619,7 +623,7 @@ class CheckoutApiTests(TestCase):
         self.assertEqual(response.data['status'], 'shipped')
         self.assertEqual(response.data['courier_name'], 'Sendy')
         self.assertEqual(response.data['tracking_number'], 'SNDY-123456')
-        self.assertEqual(float(response.data['shipping_cost']), 150.00)
+        self.assertEqual(float(response.data['shipping_cost']), 220.00)
 
     def test_checkout_decrements_product_stock(self):
         """Test that checkout properly decrements product stock."""
@@ -875,8 +879,20 @@ class SellerOrderApiTests(TestCase):
             email='other-seller@example.com', password='StrongPassword123!',
             role=UserRole.SELLER, is_verified=True,
         )
-        self.store = Store.objects.create(owner=self.seller, name='Seller Store', slug='seller-store')
-        self.other_store = Store.objects.create(owner=self.other_seller, name='Other Store', slug='other-store')
+        self.store = Store.objects.create(
+            owner=self.seller,
+            name='Seller Store',
+            slug='seller-store',
+            city='Nairobi',
+            country='Kenya',
+        )
+        self.other_store = Store.objects.create(
+            owner=self.other_seller,
+            name='Other Store',
+            slug='other-store',
+            city='Nairobi',
+            country='Kenya',
+        )
 
         self.product = Product.objects.create(
             store=self.store, name='Seller Product', slug='seller-product', sku='SELLER-001',
@@ -937,10 +953,20 @@ class SellerOrderApiTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
-        Order.objects.filter(id=order_id).update(status=OrderStatus.PROCESSING)
+        order = Order.objects.get(id=order_id)
+        order.status = OrderStatus.PROCESSING
+        order.payment_status = 'paid'
+        order.amount_paid = order.total_amount
+        order.save(update_fields=['status', 'payment_status', 'amount_paid', 'updated_at'])
+        order.fulfillments.update(status=OrderStatus.PROCESSING)
         response = self.client.patch(
             reverse('shopping:seller-order-status', args=[order_id]),
-            {'status': 'shipped'}, format='json',
+            {
+                'status': 'shipped',
+                'courier_name': 'Sendy',
+                'tracking_number': 'SNDY-TEST-001',
+            },
+            format='json',
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)

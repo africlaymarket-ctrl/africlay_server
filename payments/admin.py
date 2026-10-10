@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Payment, PaymentAttempt, Wallet, WalletTransaction
+from .models import LedgerEntry, Payment, PaymentAttempt, Wallet, WalletTransaction
 
 
 @admin.register(Wallet)
@@ -41,9 +41,26 @@ class PaymentAttemptAdmin(admin.ModelAdmin):
 
 @admin.register(Payment)
 class PaymentAdmin(admin.ModelAdmin):
-    list_display = ('id', 'order', 'provider', 'status', 'amount', 'checkout_request_id', 'created_at')
-    list_filter = ('provider', 'status', 'created_at')
+    list_display = ('id', 'order', 'provider', 'purpose', 'status', 'amount', 'checkout_request_id', 'created_at')
+    list_filter = ('provider', 'purpose', 'status', 'created_at')
     search_fields = ('order__id', 'checkout_request_id', 'merchant_request_id', 'receipt_number')
-    readonly_fields = ('id', 'order', 'provider', 'status', 'amount', 'currency', 'phone_number',
+    readonly_fields = ('id', 'order', 'provider', 'purpose', 'status', 'amount', 'currency', 'phone_number',
                       'merchant_request_id', 'checkout_request_id', 'receipt_number', 'failure_code',
                       'failure_message', 'raw_callback_payload', 'created_at', 'updated_at', 'completed_at')
+
+
+@admin.register(LedgerEntry)
+class LedgerEntryAdmin(admin.ModelAdmin):
+    list_display = ('reference', 'order', 'entry_type', 'amount', 'currency', 'user', 'created_at')
+    list_filter = ('entry_type', 'currency', 'created_at')
+    search_fields = ('reference', 'order__id', 'payment__receipt_number', 'user__email')
+    readonly_fields = [field.name for field in LedgerEntry._meta.fields]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

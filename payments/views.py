@@ -17,10 +17,13 @@ from rest_framework.response import Response
 from rest_framework.throttling import UserRateThrottle
 
 from authapp.permissions import IsBuyer
-from shopping.models import Order, OrderStatus
+from shopping.models import Order, OrderStatus, PaymentOption
 
 from .gateways.mpesa import MpesaConfigurationError, MpesaGateway, MpesaGatewayError, initiate_stk_push, validate_callback_signature
-from .models import Payment, PaymentAttempt, PaymentAttemptStatus, PaymentStatus, Wallet, WalletTransaction
+from .models import (
+    Payment, PaymentAttempt, PaymentAttemptStatus, PaymentPurpose, PaymentStatus,
+    Wallet, WalletTransaction,
+)
 from .serializers import (
     MpesaStkPushSerializer,
     PaymentInitiateSerializer,
@@ -232,25 +235,51 @@ class PaymentInitiateView(generics.GenericAPIView):
         order = get_object_or_404(Order, id=input_serializer.validated_data['order_id'], buyer=request.user)
         with transaction.atomic():
             order = Order.objects.select_for_update().get(id=order.id)
-            if order.status != OrderStatus.PENDING:
-                raise ValidationError({'order': 'Only pending orders can be paid.'})
+            requested_purpose = input_serializer.validated_data['purpose']
+            if requested_purpose == PaymentPurpose.DELIVERY_BALANCE:
+                if order.payment_option != PaymentOption.PAY_ON_DELIVERY:
+                    raise ValidationError({'payment': 'This order does not have a pay-on-delivery balance.'})
+                if order.status != OrderStatus.SHIPPED:
+                    raise ValidationError({'order': 'The delivery balance can be paid after the order ships.'})
+                if not order.delivery_fee_paid:
+                    raise ValidationError({'payment': 'The delivery fee must be paid first.'})
+                purpose = PaymentPurpose.DELIVERY_BALANCE
+                amount = order.amount_due
+            else:
+                if order.status != OrderStatus.PENDING:
+                    raise ValidationError({'order': 'The initial payment is only available for pending orders.'})
+                if order.amount_paid > 0:
+                    raise ValidationError({'payment': 'The initial payment has already been received.'})
+                if order.payment_option == PaymentOption.PAY_ON_DELIVERY:
+                    purpose = PaymentPurpose.DELIVERY_FEE
+                    amount = order.shipping_cost
+                else:
+                    purpose = PaymentPurpose.ORDER_TOTAL
+                    amount = order.total_amount
+
+            if amount <= 0:
+                raise ValidationError({'payment': 'There is no outstanding amount for this payment.'})
             existing_payment = Payment.objects.filter(
                 order=order,
+                purpose=purpose,
                 status__in=[PaymentStatus.INITIATED, PaymentStatus.PENDING],
             ).first()
             if existing_payment:
                 return Response(PaymentSerializer(existing_payment).data, status=status.HTTP_200_OK)
 
-            if order.total_amount != order.total_amount.to_integral_value():
+            if amount != amount.to_integral_value():
                 raise ValidationError({'payment': 'M-Pesa payments require a whole-number KES amount.'})
 
+            callback_token = secrets.token_urlsafe(32)
             payment = Payment.objects.create(
                 order=order,
                 provider='mpesa',
+                purpose=purpose,
                 status=PaymentStatus.INITIATED,
-                amount=order.total_amount,
+                amount=amount,
                 currency=order.currency,
                 phone_number=input_serializer.validated_data['phone_number'],
+                callback_token_hash=hashlib.sha256(callback_token.encode()).hexdigest(),
             )
 
         try:
@@ -258,6 +287,7 @@ class PaymentInitiateView(generics.GenericAPIView):
                 phone_number=payment.phone_number,
                 amount=payment.amount,
                 account_reference=str(order.id),
+                callback_token=callback_token,
             )
         except Timeout:
             payment.status = PaymentStatus.PENDING
@@ -269,6 +299,16 @@ class PaymentInitiateView(generics.GenericAPIView):
             payment.failure_message = 'Payment provider is temporarily unavailable.'
             payment.save(update_fields=['status', 'failure_message', 'updated_at'])
             raise ValidationError({'payment': 'Payment provider is temporarily unavailable.'})
+        except MpesaConfigurationError:
+            payment.status = PaymentStatus.FAILED
+            payment.failure_message = 'M-Pesa checkout is not configured.'
+            payment.save(update_fields=['status', 'failure_message', 'updated_at'])
+            raise ValidationError({'payment': 'M-Pesa checkout is not configured.'})
+        except MpesaGatewayError:
+            payment.status = PaymentStatus.FAILED
+            payment.failure_message = 'Payment provider response could not be confirmed.'
+            payment.save(update_fields=['status', 'failure_message', 'updated_at'])
+            raise ValidationError({'payment': 'Payment provider response could not be confirmed.'})
         except (KeyError, ValueError):
             payment.status = PaymentStatus.FAILED
             payment.failure_message = 'Payment provider returned an invalid response.'
@@ -302,6 +342,35 @@ class PaymentDetailView(generics.RetrieveAPIView):
 
     def get_queryset(self):
         return Payment.objects.filter(order__buyer=self.request.user).select_related('order')
+
+
+class MpesaOrderCallbackView(generics.GenericAPIView):
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    @extend_schema(request=OpenApiTypes.OBJECT, responses=OpenApiTypes.OBJECT)
+    def post(self, request, *args, **kwargs):
+        callback = request.data.get('Body', {}).get('stkCallback')
+        if not isinstance(callback, dict):
+            return Response({'ResultCode': 1, 'ResultDesc': 'Invalid callback.'}, status=400)
+
+        token_hash = hashlib.sha256(kwargs['token'].encode()).hexdigest()
+        payment = Payment.objects.filter(callback_token_hash=token_hash).first()
+        if payment is None:
+            return Response({'ResultCode': 1, 'ResultDesc': 'Invalid callback.'}, status=404)
+
+        checkout_id = str(callback.get('CheckoutRequestID', ''))
+        merchant_id = str(callback.get('MerchantRequestID', ''))
+        if (
+            (payment.checkout_request_id and payment.checkout_request_id != checkout_id)
+            or (payment.merchant_request_id and payment.merchant_request_id != merchant_id)
+        ):
+            return Response({'ResultCode': 1, 'ResultDesc': 'Callback does not match payment.'}, status=400)
+
+        processed = PaymentService.process_mpesa_callback(request.data)
+        if processed.pk != payment.pk:
+            return Response({'ResultCode': 1, 'ResultDesc': 'Callback does not match payment.'}, status=400)
+        return Response({'ResultCode': 0, 'ResultDesc': 'Callback accepted.'})
 
 
 class MpesaQueryTokenCallbackView(generics.GenericAPIView):

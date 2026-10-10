@@ -1,7 +1,7 @@
 import re
 from rest_framework import serializers
 
-from .models import Payment, PaymentAttempt, Wallet, WalletTransaction
+from .models import Payment, PaymentAttempt, PaymentPurpose, Wallet, WalletTransaction
 
 
 class WalletSerializer(serializers.ModelSerializer):
@@ -72,10 +72,15 @@ class PaymentAttemptSerializer(serializers.ModelSerializer):
 class PaymentInitiateSerializer(serializers.Serializer):
     order_id = serializers.UUIDField()
     phone_number = serializers.CharField(max_length=20)
+    purpose = serializers.ChoiceField(
+        choices=['initial', PaymentPurpose.DELIVERY_BALANCE],
+        required=False,
+        default='initial',
+    )
 
     def validate_phone_number(self, value):
         normalized = value.replace('+', '').replace(' ', '')
-        if not re.fullmatch(r'2547\d{8}', normalized):
+        if not re.fullmatch(r'254(?:7|1)\d{8}', normalized):
             raise serializers.ValidationError('Use a valid Kenyan phone number, for example 254712345678.')
         return normalized
 
@@ -85,5 +90,8 @@ class PaymentSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Payment
-        fields = ['id', 'order_id', 'provider', 'status', 'amount', 'currency', 'checkout_request_id', 'receipt_number']
+        fields = [
+            'id', 'order_id', 'provider', 'purpose', 'status', 'amount', 'currency',
+            'checkout_request_id', 'receipt_number',
+        ]
         read_only_fields = fields

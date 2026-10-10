@@ -1,9 +1,9 @@
 services:
   - type: web
-    name: africlay-server
+    name: africlay-server-main-v4
     runtime: python
     plan: free
-    region: oregon
+    region: frankfurt
     buildCommand: |
       pip install uv
       uv sync --no-install-project
@@ -17,11 +17,11 @@ services:
       - key: SECRET_KEY
         generateValue: true
       - key: PROD_ALLOWED_HOSTS
-        value: africlay-server.onrender.com
+        value: africlay-server-main-v4.onrender.com
       - key: CORS_ALLOWED_ORIGINS
-        value: https://your-frontend.vercel.app
+        value: https://africlayfrontend1.vercel.app,https://africlaymarket-o7epvskn0-africlaymarket-8594.vercel.app,https://www.africlaymarket.com,https://africlaymarket.com
       - key: CSRF_TRUSTED_ORIGINS
-        value: https://your-frontend.vercel.app
+        value: https://africlayfrontend1.vercel.app,https://africlaymarket-o7epvskn0-africlaymarket-8594.vercel.app,https://www.africlaymarket.com,https://africlaymarket.com
       - key: SECURE_SSL_REDIRECT
         value: "true"
       - key: SESSION_COOKIE_SECURE
@@ -67,14 +67,16 @@ services:
       - key: MPESA_ENVIRONMENT
         value: sandbox
       - key: MPESA_CONSUMER_KEY
-        value: ""
+        sync: false
       - key: MPESA_CONSUMER_SECRET
-        value: ""
+        sync: false
       - key: MPESA_SHORTCODE
-        value: ""
+        sync: false
       - key: MPESA_PASSKEY
-        value: ""
+        sync: false
       - key: MPESA_CALLBACK_BASE_URL
-        value: https://africlay-server.onrender.com
+        value: https://africlay-server-main-v4.onrender.com
+      - key: MPESA_CALLBACK_SECRET
+        sync: false
       - key: MPESA_PUBLIC_CERT
-        value: ""
+        sync: false

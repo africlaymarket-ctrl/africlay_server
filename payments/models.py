@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal
 
 from django.conf import settings
 from django.core.validators import MinValueValidator, RegexValidator
@@ -84,6 +85,25 @@ class PaymentStatus(models.TextChoices):
     CANCELLED = 'cancelled', 'Cancelled'
 
 
+class PaymentPurpose(models.TextChoices):
+    ORDER_TOTAL = 'order_total', 'Order Total'
+    DELIVERY_FEE = 'delivery_fee', 'Delivery Fee'
+    DELIVERY_BALANCE = 'delivery_balance', 'Pay on Delivery Balance'
+
+
+class LedgerEntryType(models.TextChoices):
+    CUSTOMER_PAYMENT = 'customer_payment', 'Customer Payment Received'
+    DELIVERY_FEE = 'delivery_fee', 'Delivery Fee Received'
+    SELLER_PROCEEDS_HOLD = 'seller_proceeds_hold', 'Seller Proceeds Held'
+    SELLER_PROCEEDS_RELEASE = 'seller_proceeds_release', 'Seller Proceeds Released'
+    SELLER_PROCEEDS_REVERSAL = 'seller_proceeds_reversal', 'Seller Proceeds Reversed'
+    COMMISSION_HOLD = 'commission_hold', 'Commission Held'
+    COMMISSION_EARNED = 'commission_earned', 'Commission Earned'
+    COMMISSION_REVERSAL = 'commission_reversal', 'Commission Reversed'
+    REFUND_DUE = 'refund_due', 'Refund Due'
+    REFUND_COMPLETED = 'refund_completed', 'Refund Completed'
+
+
 class PaymentAttempt(TimestampedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='payment_attempts')
@@ -121,10 +141,12 @@ class Payment(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name='payments')
     provider = models.CharField(max_length=30, default='mpesa')
+    purpose = models.CharField(max_length=24, choices=PaymentPurpose.choices, default=PaymentPurpose.ORDER_TOTAL)
     status = models.CharField(max_length=20, choices=PaymentStatus.choices, default=PaymentStatus.INITIATED)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     currency = models.CharField(max_length=3, default='KES')
     phone_number = models.CharField(max_length=20)
+    callback_token_hash = models.CharField(max_length=64, unique=True, null=True, blank=True)
     merchant_request_id = models.CharField(max_length=100, blank=True)
     checkout_request_id = models.CharField(max_length=100, blank=True)
     receipt_number = models.CharField(max_length=100, blank=True)
@@ -142,8 +164,47 @@ class Payment(models.Model):
                 condition=Q(checkout_request_id__gt=''),
                 name='unique_payment_provider_checkout',
             ),
+            models.UniqueConstraint(
+                fields=['provider', 'receipt_number'],
+                condition=Q(receipt_number__gt=''),
+                name='unique_payment_provider_receipt',
+            ),
         ]
         indexes = [models.Index(fields=['order', 'status'], name='payments_pa_order_i_a76289_idx')]
 
     def __str__(self):
         return f'{self.provider} payment for order {self.order_id}'
+
+
+class LedgerEntry(TimestampedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name='ledger_entries')
+    payment = models.ForeignKey(
+        Payment,
+        on_delete=models.PROTECT,
+        related_name='ledger_entries',
+        null=True,
+        blank=True,
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name='ledger_entries',
+        null=True,
+        blank=True,
+    )
+    entry_type = models.CharField(max_length=32, choices=LedgerEntryType.choices)
+    amount = models.DecimalField(max_digits=14, decimal_places=2, validators=[MinValueValidator(Decimal('0.01'))])
+    currency = models.CharField(max_length=3, validators=[currency_code_validator], default='KES')
+    reference = models.CharField(max_length=160, unique=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['created_at', 'id']
+        indexes = [
+            models.Index(fields=['order', 'entry_type']),
+            models.Index(fields=['user', 'entry_type']),
+        ]
+
+    def __str__(self):
+        return f'{self.entry_type} {self.amount} {self.currency} for {self.order_id}'

@@ -33,6 +33,10 @@ class ProductApiTests(TestCase):
 			'price': '1800.00',
 			'currency': 'KES',
 			'stock_quantity': 12,
+			'weight_kg': '0.500',
+			'length_cm': '15.00',
+			'width_cm': '12.00',
+			'height_cm': '10.00',
 		}
 
 	def authenticate_as(self, user):

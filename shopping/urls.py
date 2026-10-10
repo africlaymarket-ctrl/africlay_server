@@ -1,7 +1,7 @@
 from django.urls import path
 
 from .views import (
-    CartDetailView, CartItemDetailView, CartItemListCreateView, CheckoutView,
+    CartDetailView, CartItemDetailView, CartItemListCreateView, CheckoutView, ShippingQuoteView,
     OrderDeliveryConfirmationView, OrderDetailView, OrderListView,
     SellerOrderDetailView, SellerOrderListView, SellerOrderStatusUpdateView, SellerOrderStatusView,
     WishlistView, WishlistItemListCreateView, WishlistItemDeleteView,
@@ -15,6 +15,7 @@ urlpatterns = [
     path('items/', CartItemListCreateView.as_view(), name='cart-item-list'),
     path('items/<uuid:pk>/', CartItemDetailView.as_view(), name='cart-item-detail'),
     path('checkout/', CheckoutView.as_view(), name='checkout'),
+    path('shipping-quote/', ShippingQuoteView.as_view(), name='shipping-quote'),
     path('orders/', OrderListView.as_view(), name='order-list'),
     path('orders/<uuid:pk>/', OrderDetailView.as_view(), name='order-detail'),
     path('orders/<uuid:pk>/confirm-delivery/', OrderDeliveryConfirmationView.as_view(), name='order-confirm-delivery'),

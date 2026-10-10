@@ -53,6 +53,15 @@ class Product(TimestampedModel):
 	price = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0.01'))])
 	currency = models.CharField(max_length=3, default='KES')
 	stock_quantity = models.PositiveIntegerField(default=0)
+	weight_kg = models.DecimalField(
+		max_digits=8,
+		decimal_places=3,
+		default=Decimal('1.000'),
+		validators=[MinValueValidator(Decimal('0.001'))],
+	)
+	length_cm = models.DecimalField(max_digits=7, decimal_places=2, blank=True, null=True)
+	width_cm = models.DecimalField(max_digits=7, decimal_places=2, blank=True, null=True)
+	height_cm = models.DecimalField(max_digits=7, decimal_places=2, blank=True, null=True)
 	status = models.CharField(max_length=20, choices=ProductStatus.choices, default=ProductStatus.DRAFT)
 
 	class Meta:

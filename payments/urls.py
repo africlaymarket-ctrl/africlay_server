@@ -2,6 +2,7 @@ from django.urls import path
 
 from .views import (
     MpesaCallbackView,
+    MpesaOrderCallbackView,
     MpesaQueryTokenCallbackView,
     PaymentDetailView,
     PaymentInitiateView,
@@ -18,6 +19,7 @@ urlpatterns = [
     path('initiate/', PaymentInitiateView.as_view(), name='payment-initiate'),
     path('<uuid:pk>/', PaymentDetailView.as_view(), name='payment-detail'),
     path('mpesa/callback/', MpesaQueryTokenCallbackView.as_view(), name='mpesa-callback'),
+    path('provider-callback/<str:token>/', MpesaOrderCallbackView.as_view(), name='order-provider-callback'),
     path('mpesa/stk-push/', MpesaStkPushView.as_view(), name='mpesa-stk-push'),
     path('mpesa/callback/<str:token>/', MpesaCallbackView.as_view(), name='mpesa-callback-token'),
 ]

@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Cart, CartItem, Order, OrderItem
+from .models import Cart, CartItem, Order, OrderFulfillment, OrderItem
 
 
 class CartItemInline(admin.TabularInline):
@@ -30,16 +30,31 @@ class OrderItemInline(admin.TabularInline):
     can_delete = False
 
 
+class OrderFulfillmentInline(admin.TabularInline):
+    model = OrderFulfillment
+    extra = 0
+    readonly_fields = [field.name for field in OrderFulfillment._meta.fields]
+    can_delete = False
+
+
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
-    inlines = (OrderItemInline,)
-    list_display = ('id', 'buyer', 'total_amount', 'status', 'created_at')
-    list_filter = ('status', 'created_at')
+    inlines = (OrderItemInline, OrderFulfillmentInline)
+    list_display = ('id', 'buyer', 'total_amount', 'payment_option', 'payment_status', 'status', 'created_at')
+    list_filter = ('status', 'payment_option', 'payment_status', 'created_at')
     search_fields = ('buyer__email', 'id')
-    readonly_fields = ('id', 'buyer', 'total_amount', 'currency', 'status', 'created_at', 'updated_at')
+    readonly_fields = (
+        'id', 'buyer', 'item_subtotal', 'shipping_cost', 'total_amount', 'currency',
+        'payment_option', 'payment_method', 'payment_status', 'amount_paid',
+        'delivery_fee_paid', 'status', 'created_at', 'updated_at',
+    )
     fieldsets = (
         ('Order Info', {
-            'fields': ('id', 'buyer', 'total_amount', 'currency', 'status', 'created_at', 'updated_at')
+            'fields': (
+                'id', 'buyer', 'item_subtotal', 'shipping_cost', 'total_amount', 'currency',
+                'payment_option', 'payment_method', 'payment_status', 'amount_paid',
+                'delivery_fee_paid', 'status', 'created_at', 'updated_at',
+            )
         }),
         ('Shipping Address', {
             'fields': ('shipping_address', 'shipping_city', 'shipping_postal_code', 'shipping_country')

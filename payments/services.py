@@ -1,16 +1,23 @@
 from decimal import Decimal, InvalidOperation
 
 from django.db import IntegrityError, transaction
+from django.db.models import Sum
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
 from shopping.models import (
+    OrderFulfillment,
     OrderStatus,
     PaymentMethod as OrderPaymentMethod,
+    PaymentOption,
     PaymentStatus as OrderPaymentStatus,
+    SettlementStatus,
 )
 
-from .models import Payment, PaymentStatus, Wallet, WalletTransaction, WalletTransactionType
+from .models import (
+    LedgerEntry, LedgerEntryType, Payment, PaymentPurpose, PaymentStatus, Wallet,
+    WalletTransaction, WalletTransactionType,
+)
 
 
 class WalletOperationError(Exception):
@@ -201,6 +208,68 @@ def transfer_escrow_to_wallet(source_wallet, destination_wallet, amount, referen
         return source_entry, destination_entry
 
 
+def record_ledger_entry(*, order, entry_type, amount, reference, payment=None, user=None, metadata=None):
+    amount = _validated_amount(amount)
+    entry, created = LedgerEntry.objects.get_or_create(
+        reference=reference,
+        defaults={
+            'order': order,
+            'payment': payment,
+            'user': user,
+            'entry_type': entry_type,
+            'amount': amount,
+            'currency': order.currency,
+            'metadata': metadata or {},
+        },
+    )
+    if not created and (
+        entry.order_id != order.pk
+        or entry.payment_id != getattr(payment, 'pk', None)
+        or entry.user_id != getattr(user, 'pk', None)
+        or entry.entry_type != entry_type
+        or entry.amount != amount
+    ):
+        raise WalletOperationError('Ledger reference was already used for a different transaction.')
+    return entry
+
+
+def hold_mpesa_seller_proceeds(order):
+    fulfillments = OrderFulfillment.objects.select_for_update().filter(
+        order=order,
+    ).exclude(status=OrderStatus.CANCELLED).select_related('seller')
+    for fulfillment in fulfillments:
+        if fulfillment.settlement_status in {SettlementStatus.HELD, SettlementStatus.RELEASED}:
+            continue
+        wallet, _ = Wallet.objects.get_or_create(user=fulfillment.seller, currency=order.currency)
+        credit_wallet(
+            wallet,
+            fulfillment.seller_proceeds,
+            f'order:{order.pk}:seller:{fulfillment.seller_id}:earning',
+            WalletTransactionType.SELLER_EARNING,
+        )
+        place_escrow_hold(
+            wallet,
+            fulfillment.seller_proceeds,
+            f'order:{order.pk}:seller:{fulfillment.seller_id}:hold',
+        )
+        record_ledger_entry(
+            order=order,
+            user=fulfillment.seller,
+            entry_type=LedgerEntryType.SELLER_PROCEEDS_HOLD,
+            amount=fulfillment.seller_proceeds,
+            reference=f'order:{order.pk}:seller:{fulfillment.seller_id}:proceeds-hold',
+        )
+        record_ledger_entry(
+            order=order,
+            user=fulfillment.seller,
+            entry_type=LedgerEntryType.COMMISSION_HOLD,
+            amount=fulfillment.commission_amount,
+            reference=f'order:{order.pk}:seller:{fulfillment.seller_id}:commission-hold',
+        )
+        fulfillment.settlement_status = SettlementStatus.HELD
+        fulfillment.save(update_fields=['settlement_status', 'updated_at'])
+
+
 class PaymentService:
     @staticmethod
     @transaction.atomic
@@ -239,7 +308,10 @@ class PaymentService:
         if result_code == 0:
             if metadata.get('Amount') is None or not metadata.get('MpesaReceiptNumber'):
                 raise ValidationError({'callback': 'Successful callback is missing payment metadata.'})
-            if payment.order.status != OrderStatus.PENDING:
+            valid_statuses = {OrderStatus.PENDING, OrderStatus.PROCESSING}
+            if payment.purpose == PaymentPurpose.DELIVERY_BALANCE:
+                valid_statuses.add(OrderStatus.SHIPPED)
+            if payment.order.status not in valid_statuses:
                 raise ValidationError({'callback': 'Payment is not valid for the current order status.'})
             try:
                 callback_amount = Decimal(str(metadata['Amount']))
@@ -247,19 +319,80 @@ class PaymentService:
                 raise ValidationError({'callback': 'Callback amount is invalid.'})
             if callback_amount != payment.amount:
                 raise ValidationError({'callback': 'Callback amount does not match the order amount.'})
+            callback_phone = metadata.get('PhoneNumber')
+            if callback_phone is not None and str(callback_phone).replace('+', '') != payment.phone_number:
+                raise ValidationError({'callback': 'Callback phone number does not match the payment request.'})
+            callback_merchant_id = str(callback.get('MerchantRequestID', ''))
+            if payment.merchant_request_id and callback_merchant_id != payment.merchant_request_id:
+                raise ValidationError({'callback': 'Callback merchant request identifier does not match.'})
             payment.status = PaymentStatus.SUCCEEDED
             payment.receipt_number = str(metadata.get('MpesaReceiptNumber', ''))
             payment.completed_at = timezone.now()
+            record_ledger_entry(
+                order=payment.order,
+                payment=payment,
+                user=payment.order.buyer,
+                entry_type=LedgerEntryType.CUSTOMER_PAYMENT,
+                amount=payment.amount,
+                reference=f'payment:{payment.pk}:received',
+                metadata={
+                    'provider': payment.provider,
+                    'purpose': payment.purpose,
+                    'receipt_number': payment.receipt_number,
+                },
+            )
+            if (
+                payment.purpose in {PaymentPurpose.ORDER_TOTAL, PaymentPurpose.DELIVERY_FEE}
+                and payment.order.shipping_cost > 0
+            ):
+                record_ledger_entry(
+                    order=payment.order,
+                    payment=payment,
+                    entry_type=LedgerEntryType.DELIVERY_FEE,
+                    amount=payment.order.shipping_cost,
+                    reference=f'order:{payment.order_id}:delivery-fee-received',
+                )
+            already_paid = Payment.objects.filter(
+                order=payment.order,
+                status=PaymentStatus.SUCCEEDED,
+            ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+            amount_paid = min(payment.order.total_amount, already_paid + payment.amount)
+            payment.order.amount_paid = amount_paid
+            payment.order.delivery_fee_paid = (
+                payment.purpose == PaymentPurpose.ORDER_TOTAL
+                or Payment.objects.filter(
+                    order=payment.order,
+                    purpose=PaymentPurpose.DELIVERY_FEE,
+                    status=PaymentStatus.SUCCEEDED,
+                ).exists()
+                or payment.purpose == PaymentPurpose.DELIVERY_FEE
+            )
+            payment.order.payment_method = OrderPaymentMethod.MPESA
+            payment.order.payment_status = (
+                OrderPaymentStatus.PAID
+                if amount_paid >= payment.order.total_amount
+                else OrderPaymentStatus.PARTIAL
+            )
             if payment.order.status == OrderStatus.PENDING:
                 payment.order.status = OrderStatus.PROCESSING
-                payment.order.payment_method = OrderPaymentMethod.MPESA
-                payment.order.payment_status = OrderPaymentStatus.PAID
-                payment.order.save(update_fields=['status', 'payment_method', 'payment_status', 'updated_at'])
+            payment.order.save(update_fields=[
+                'amount_paid', 'delivery_fee_paid', 'payment_method', 'payment_status',
+                'status', 'updated_at',
+            ])
+            OrderFulfillment.objects.filter(
+                order=payment.order,
+                status=OrderStatus.PENDING,
+            ).update(status=OrderStatus.PROCESSING)
+            if payment.order.payment_status == OrderPaymentStatus.PAID:
+                hold_mpesa_seller_proceeds(payment.order)
         else:
             payment.status = PaymentStatus.FAILED
             payment.failure_code = str(result_code or '')
             payment.failure_message = callback.get('ResultDesc', 'Payment failed.')[:255]
             payment.completed_at = timezone.now()
+            if payment.order.amount_paid == 0:
+                payment.order.payment_status = OrderPaymentStatus.FAILED
+                payment.order.save(update_fields=['payment_status', 'updated_at'])
 
         payment.save()
         return payment
