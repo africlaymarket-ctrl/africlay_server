@@ -1,6 +1,5 @@
 import base64
 import json
-from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import requests
@@ -16,7 +15,34 @@ class MpesaConfigurationError(Exception):
 
 
 class MpesaGatewayError(Exception):
-    pass
+    def __init__(self, message, *, stage=None, status_code=None, provider_code=None, provider_reason=None):
+        super().__init__(message)
+        self.stage = stage
+        self.status_code = status_code
+        self.provider_code = provider_code
+        self.provider_reason = provider_reason
+
+
+def _gateway_error(message, stage, error):
+    response = getattr(error, 'response', None)
+    status_code = getattr(response, 'status_code', None)
+    provider_code = None
+    provider_reason = None
+    if response is not None:
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        if isinstance(payload, dict):
+            provider_code = payload.get('errorCode') or payload.get('error_code') or payload.get('ResponseCode')
+            provider_reason = payload.get('errorMessage') or payload.get('error_description')
+    return MpesaGatewayError(
+        message,
+        stage=stage,
+        status_code=status_code,
+        provider_code=str(provider_code)[:80] if provider_code else None,
+        provider_reason=str(provider_reason).replace('\n', ' ')[:200] if provider_reason else None,
+    )
 
 
 def _configuration():
@@ -138,35 +164,56 @@ class MpesaGateway:
 
     def initiate_payment(self, *, phone_number, amount, account_reference, callback_token):
         credentials = base64.b64encode(f'{self.consumer_key}:{self.consumer_secret}'.encode()).decode()
-        token_response = requests.get(
-            f'{self.base_url}/oauth/v1/generate?grant_type=client_credentials',
-            headers={'Authorization': f'Basic {credentials}'},
-            timeout=self.timeout,
-        )
-        token_response.raise_for_status()
-        access_token = token_response.json()['access_token']
-        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+        try:
+            token_response = requests.get(
+                f'{self.base_url}/oauth/v1/generate?grant_type=client_credentials',
+                headers={'Authorization': f'Basic {credentials}'},
+                timeout=self.timeout,
+            )
+            token_response.raise_for_status()
+            access_token = token_response.json()['access_token']
+        except requests.Timeout:
+            raise
+        except requests.RequestException as error:
+            raise _gateway_error('Unable to authenticate with M-Pesa.', 'authentication', error) from error
+        except (KeyError, ValueError, TypeError) as error:
+            raise MpesaGatewayError(
+                'M-Pesa returned an invalid authentication response.',
+                stage='authentication',
+            ) from error
+
+        timestamp = timezone.localtime(timezone.now(), ZoneInfo('Africa/Nairobi')).strftime('%Y%m%d%H%M%S')
         password = base64.b64encode(f'{self.short_code}{self.passkey}{timestamp}'.encode()).decode()
         callback_url = (
             f'{self.callback_base_url}/api/payments/provider-callback/{callback_token}/'
         )
-        response = requests.post(
-            f'{self.base_url}/mpesa/stkpush/v1/processrequest',
-            headers={'Authorization': f'Bearer {access_token}'},
-            json={
-                'BusinessShortCode': self.short_code,
-                'Password': password,
-                'Timestamp': timestamp,
-                'TransactionType': 'CustomerPayBillOnline',
-                'Amount': int(amount),
-                'PartyA': phone_number,
-                'PartyB': self.short_code,
-                'PhoneNumber': phone_number,
-                'CallBackURL': callback_url,
-                'AccountReference': account_reference,
-                'TransactionDesc': 'Africlay order payment',
-            },
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
-        return response.json()
+        try:
+            response = requests.post(
+                f'{self.base_url}/mpesa/stkpush/v1/processrequest',
+                headers={'Authorization': f'Bearer {access_token}'},
+                json={
+                    'BusinessShortCode': self.short_code,
+                    'Password': password,
+                    'Timestamp': timestamp,
+                    'TransactionType': 'CustomerPayBillOnline',
+                    'Amount': int(amount),
+                    'PartyA': phone_number,
+                    'PartyB': self.short_code,
+                    'PhoneNumber': phone_number,
+                    'CallBackURL': callback_url,
+                    'AccountReference': account_reference,
+                    'TransactionDesc': 'Africlay order payment',
+                },
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.Timeout:
+            raise
+        except requests.RequestException as error:
+            raise _gateway_error('M-Pesa rejected the payment request.', 'stk_push', error) from error
+        except (ValueError, TypeError) as error:
+            raise MpesaGatewayError(
+                'M-Pesa returned an invalid payment response.',
+                stage='stk_push',
+            ) from error

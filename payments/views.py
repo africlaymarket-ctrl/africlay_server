@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import secrets
 from decimal import Decimal, InvalidOperation
 
@@ -34,6 +35,9 @@ from .serializers import (
     WalletTransactionSerializer,
 )
 from .services import PaymentService, WalletOperationError, credit_wallet
+
+
+logger = logging.getLogger(__name__)
 
 
 class WalletTransactionPagination(LimitOffsetPagination):
@@ -294,21 +298,39 @@ class PaymentInitiateView(generics.GenericAPIView):
             payment.failure_message = 'Payment provider response is pending reconciliation.'
             payment.save(update_fields=['status', 'failure_message', 'updated_at'])
             raise ValidationError({'payment': 'Payment status is pending provider confirmation.'})
-        except RequestException:
+        except RequestException as error:
+            logger.warning(
+                'M-Pesa transport failure stage=unknown error_type=%s environment=%s',
+                type(error).__name__,
+                settings.MPESA_ENVIRONMENT,
+            )
             payment.status = PaymentStatus.FAILED
             payment.failure_message = 'Payment provider is temporarily unavailable.'
             payment.save(update_fields=['status', 'failure_message', 'updated_at'])
             raise ValidationError({'payment': 'Payment provider is temporarily unavailable.'})
-        except MpesaConfigurationError:
+        except MpesaConfigurationError as error:
+            logger.error(
+                'M-Pesa configuration failure environment=%s reason=%s',
+                settings.MPESA_ENVIRONMENT,
+                str(error),
+            )
             payment.status = PaymentStatus.FAILED
             payment.failure_message = 'M-Pesa checkout is not configured.'
             payment.save(update_fields=['status', 'failure_message', 'updated_at'])
             raise ValidationError({'payment': 'M-Pesa checkout is not configured.'})
-        except MpesaGatewayError:
+        except MpesaGatewayError as error:
+            logger.warning(
+                'M-Pesa gateway failure stage=%s status=%s provider_code=%s provider_reason=%s environment=%s',
+                error.stage or 'unknown',
+                error.status_code or 'none',
+                error.provider_code or 'none',
+                error.provider_reason or 'none',
+                settings.MPESA_ENVIRONMENT,
+            )
             payment.status = PaymentStatus.FAILED
-            payment.failure_message = 'Payment provider response could not be confirmed.'
+            payment.failure_message = 'M-Pesa could not start this payment.'
             payment.save(update_fields=['status', 'failure_message', 'updated_at'])
-            raise ValidationError({'payment': 'Payment provider response could not be confirmed.'})
+            raise ValidationError({'payment': 'M-Pesa could not start this payment. Please try again.'})
         except (KeyError, ValueError):
             payment.status = PaymentStatus.FAILED
             payment.failure_message = 'Payment provider returned an invalid response.'

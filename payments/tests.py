@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -56,7 +57,9 @@ class MpesaGatewayTests(TestCase):
     )
     @patch('payments.gateways.mpesa.requests.post')
     @patch('payments.gateways.mpesa.requests.get')
-    def test_initiate_payment_uses_access_token_and_per_payment_callback(self, get, post):
+    @patch('payments.gateways.mpesa.timezone.now')
+    def test_initiate_payment_uses_access_token_kenya_time_and_per_payment_callback(self, now, get, post):
+        now.return_value = datetime(2026, 10, 11, 10, 15, 30, tzinfo=UTC)
         get.return_value.json.return_value = {'access_token': 'generated-token'}
         post.return_value.json.return_value = {
             'MerchantRequestID': 'merchant-id',
@@ -79,6 +82,7 @@ class MpesaGatewayTests(TestCase):
             post.call_args.kwargs['json']['CallBackURL'],
             'https://api.africlaymarket.com/api/payments/provider-callback/payment-token/',
         )
+        self.assertEqual(post.call_args.kwargs['json']['Timestamp'], '20261011131530')
 
 
 class WalletApiTests(TestCase):
