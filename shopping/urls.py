@@ -4,6 +4,7 @@ from .views import (
     CartDetailView, CartItemDetailView, CartItemListCreateView, CheckoutView, ShippingQuoteView,
     OrderDeliveryConfirmationView, OrderDetailView, OrderListView,
     SellerOrderDetailView, SellerOrderListView, SellerOrderStatusUpdateView, SellerOrderStatusView,
+    SupportedShippingTownListView,
     WishlistView, WishlistItemListCreateView, WishlistItemDeleteView,
 )
 
@@ -11,6 +12,7 @@ from .views import (
 app_name = 'shopping'
 
 urlpatterns = [
+    path('shipping-towns/', SupportedShippingTownListView.as_view(), name='shipping-town-list'),
     path('', CartDetailView.as_view(), name='cart-detail'),
     path('items/', CartItemListCreateView.as_view(), name='cart-item-list'),
     path('items/<uuid:pk>/', CartItemDetailView.as_view(), name='cart-item-detail'),

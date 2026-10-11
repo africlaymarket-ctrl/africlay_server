@@ -33,14 +33,23 @@ from .serializers import (
     OrderDetailSerializer,
     OrderStatusUpdateSerializer,
     SellerOrderDetailSerializer,
+    SupportedShippingTownListSerializer,
     WishlistSerializer,
     WishlistItemSerializer,
 )
-from .shipping import ShippingQuoteError, quote_cart_items
+from .shipping import SUPPORTED_TOWNS, ShippingQuoteError, quote_cart_items
 
 
 COMMISSION_RATE = Decimal('0.1000')
 MONEY = Decimal('0.01')
+
+
+class SupportedShippingTownListView(generics.GenericAPIView):
+    permission_classes = [permissions.AllowAny]
+    serializer_class = SupportedShippingTownListSerializer
+
+    def get(self, request, *args, **kwargs):
+        return Response({'towns': list(SUPPORTED_TOWNS)})
 
 
 def _cart_items(cart):

@@ -142,6 +142,22 @@ REMOTE_ORIGIN_BY_TOWN = {
     normalize_town(town): region for town, region in REMOTE_ORIGIN_REGIONS.items()
 }
 
+SUPPORTED_TOWNS = tuple(sorted(
+    {
+        town
+        for towns in REGION_TOWNS.values()
+        for town in towns
+    } | set(REMOTE_RATES),
+    key=str.casefold,
+))
+SUPPORTED_TOWN_BY_NORMALIZED_NAME = {
+    normalize_town(town): town for town in SUPPORTED_TOWNS
+}
+
+
+def canonical_shipping_town(value):
+    return SUPPORTED_TOWN_BY_NORMALIZED_NAME.get(normalize_town(value))
+
 
 def region_for_town(city):
     normalized = normalize_town(city)
@@ -220,7 +236,7 @@ def quote_cart_items(cart_items, destination_city):
         origin_region = region_for_town(store.city)
         if origin_region is None:
             raise ShippingQuoteError(
-                f'{store.name} must add a supported dispatch town before this order can be delivered.',
+                f'Delivery from {store.name} is temporarily unavailable because the seller has not set a supported dispatch town.',
             )
 
         item_subtotal = Decimal('0.00')

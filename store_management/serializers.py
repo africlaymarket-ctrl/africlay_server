@@ -2,6 +2,8 @@ from django.core.files.uploadedfile import UploadedFile
 from django.db.models.fields.files import FieldFile
 from rest_framework import serializers
 
+from shopping.shipping import canonical_shipping_town
+
 from .models import Store, StoreKYC, StoreKYCDocumentType, StoreKYCStatus
 
 
@@ -37,6 +39,17 @@ class StoreSerializer(serializers.ModelSerializer):
             'id', 'owner', 'status', 'average_rating', 'total_reviews', 'total_orders',
             'total_products', 'created_at', 'updated_at',
         ]
+
+    def validate_city(self, value):
+        town = canonical_shipping_town(value)
+        if town is None:
+            raise serializers.ValidationError('Choose a supported dispatch town.')
+        return town
+
+    def validate(self, attrs):
+        if self.instance is None and not attrs.get('city'):
+            raise serializers.ValidationError({'city': 'Choose a dispatch town for delivery pricing.'})
+        return attrs
 
 
 class StoreKYCSerializer(serializers.ModelSerializer):

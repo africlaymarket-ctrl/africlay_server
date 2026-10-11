@@ -8,6 +8,10 @@ from .models import (
 )
 
 
+class SupportedShippingTownListSerializer(serializers.Serializer):
+    towns = serializers.ListField(child=serializers.CharField(), read_only=True)
+
+
 class CartItemSerializer(serializers.ModelSerializer):
     product = serializers.UUIDField(read_only=True, source='product_id')
     product_name = serializers.CharField(source='product.name', read_only=True)

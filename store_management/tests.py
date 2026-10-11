@@ -21,6 +21,7 @@ class StoreApiTests(TestCase):
 			'name': 'Nairobi Clay Studio',
 			'slug': 'nairobi-clay-studio',
 			'description': 'Handmade ceramic pieces from Nairobi.',
+			'city': 'Nairobi',
 		}
 		self.seller = create_verified_user(UserRole.SELLER, 'store-seller')
 
@@ -42,6 +43,46 @@ class StoreApiTests(TestCase):
 		self.assertEqual(response.data['legal_name'], 'Nairobi Clay Studio Ltd')
 		self.assertEqual(response.data['city'], 'Nairobi')
 		self.assertEqual(response.data['owner'], str(self.seller.id))
+
+	def test_store_creation_requires_supported_dispatch_town(self):
+		self.authenticate_as(self.seller)
+		without_city = {key: value for key, value in self.store_data.items() if key != 'city'}
+
+		missing_response = self.client.post(
+			reverse('store_management:store-list-create'),
+			without_city,
+			format='json',
+		)
+		unsupported_response = self.client.post(
+			reverse('store_management:store-list-create'),
+			{**self.store_data, 'city': 'Unknown Town'},
+			format='json',
+		)
+
+		self.assertEqual(missing_response.status_code, status.HTTP_400_BAD_REQUEST)
+		self.assertIn('city', missing_response.data)
+		self.assertEqual(unsupported_response.status_code, status.HTTP_400_BAD_REQUEST)
+		self.assertIn('city', unsupported_response.data)
+
+	def test_store_city_is_saved_with_canonical_spelling(self):
+		self.authenticate_as(self.seller)
+
+		response = self.client.post(
+			reverse('store_management:store-list-create'),
+			{**self.store_data, 'city': 'nakuru'},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+		self.assertEqual(response.data['city'], 'Nakuru')
+
+	def test_supported_shipping_towns_are_public(self):
+		response = self.client.get(reverse('shopping:shipping-town-list'))
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertIn('Nakuru', response.data['towns'])
+		self.assertIn('Nairobi', response.data['towns'])
+		self.assertEqual(response.data['towns'], sorted(response.data['towns'], key=str.casefold))
 
 	def test_buyer_cannot_create_store(self):
 		buyer = User.objects.create_user(
