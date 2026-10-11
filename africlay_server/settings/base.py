@@ -226,6 +226,11 @@ SUPABASE_SIGNED_URL_TTL = int(os.getenv('SUPABASE_SIGNED_URL_TTL', '3600'))
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+# Transactional requests must not wait on SMTP. In-app notifications remain
+# available even when best-effort notification emails are disabled.
+NOTIFICATION_EMAILS_ENABLED = os.getenv('NOTIFICATION_EMAILS_ENABLED', 'False').lower() in ('true', '1', 't')
+EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', '5'))
+
 # SMS Gateway Configuration (Cradle Voices / CodeYetuSMS)
 SMS_URL = os.getenv('SMS_URL', 'https://api.cradlevoices.com/v1/sms/send')
 SMS_TOKEN = os.getenv('SMS_TOKEN', '')

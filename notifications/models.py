@@ -20,9 +20,10 @@ def create_notification(user, *, title, message, notification_type=None):
         message=message,
         notification_type=notification_type,
     )
-    from .services import send_notification_email
+    if settings.NOTIFICATION_EMAILS_ENABLED:
+        from .services import send_notification_email
 
-    transaction.on_commit(lambda: send_notification_email(notification.pk))
+        transaction.on_commit(lambda: send_notification_email(notification.pk))
     return notification
 
 

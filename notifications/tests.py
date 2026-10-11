@@ -11,6 +11,7 @@ from .models import Notification, create_notification
 @override_settings(
 	EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
 	DEFAULT_FROM_EMAIL='notifications@africlay.com',
+	NOTIFICATION_EMAILS_ENABLED=True,
 )
 class NotificationEmailTests(TestCase):
 	def setUp(self):
@@ -59,4 +60,18 @@ class NotificationEmailTests(TestCase):
 					message='Your order has been placed.',
 				)
 
+		self.assertTrue(Notification.objects.filter(pk=notification.pk).exists())
+
+	@override_settings(NOTIFICATION_EMAILS_ENABLED=False)
+	def test_disabled_notification_email_does_not_register_commit_callback(self):
+		with patch('notifications.services.send_notification_email') as send_email:
+			with self.captureOnCommitCallbacks(execute=True) as callbacks:
+				notification = create_notification(
+					self.user,
+					title='Order placed',
+					message='Your order has been placed.',
+				)
+
+		self.assertEqual(callbacks, [])
+		send_email.assert_not_called()
 		self.assertTrue(Notification.objects.filter(pk=notification.pk).exists())
