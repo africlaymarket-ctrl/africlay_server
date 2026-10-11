@@ -427,8 +427,11 @@ class SellerOrderStatusUpdateView(generics.GenericAPIView):
         serializer.is_valid(raise_exception=True)
         target_status = serializer.validated_data['status']
         with transaction.atomic():
+            seller_order_ids = OrderItem.objects.filter(
+                seller=request.user,
+            ).values('order_id')
             order = get_object_or_404(
-                Order.objects.select_for_update().filter(items__seller=request.user).distinct(),
+                Order.objects.select_for_update().filter(pk__in=seller_order_ids),
                 pk=kwargs['pk'],
             )
             fulfillment = get_object_or_404(
