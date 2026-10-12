@@ -95,8 +95,12 @@ class StoreKYCSubmitView(generics.CreateAPIView):
             if existing and existing.document:
                 previous_document_name = existing.document.name
 
-            payload = request.data.copy() if hasattr(request.data, 'copy') else request.data
+            payload = request.data
             if existing and existing.status == StoreKYCStatus.REJECTED:
+                # QueryDict.copy() deep-copies uploaded files, which fails for
+                # disk-backed TemporaryUploadedFile instances. KYC fields are
+                # single-valued, so a shallow mapping is sufficient here.
+                payload = {key: request.data.get(key) for key in request.data}
                 raw_document = payload.get('document')
                 if raw_document in (None, '', 'null') or not isinstance(raw_document, (UploadedFile, FieldFile, type(None))):
                     payload.pop('document', None)

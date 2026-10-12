@@ -1,5 +1,5 @@
 from django.urls import reverse
-from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.files.uploadedfile import SimpleUploadedFile, TemporaryUploadedFile
 from django.core.files.storage import default_storage
 from rest_framework import status
 from rest_framework.test import APIClient
@@ -195,6 +195,29 @@ class StoreApiTests(TestCase):
 		self.assertEqual(response.data['status'], StoreKYCStatus.PENDING)
 		self.assertEqual(response.data['store'], store['id'])
 		self.assertIsNotNone(response.data['submitted_at'])
+
+	def test_seller_can_submit_store_kyc_with_disk_backed_upload(self):
+		store = self.create_store()
+		document_bytes = b'%PDF-1.4 temporary upload'
+		document = TemporaryUploadedFile(
+			'registration.pdf',
+			'application/pdf',
+			len(document_bytes),
+			None,
+		)
+		document.write(document_bytes)
+		document.seek(0)
+		payload = self.kyc_payload()
+		payload['document'] = document
+
+		response = self.client.post(
+			reverse('store_management:store-kyc-submit', kwargs={'slug': store['slug']}),
+			payload,
+			format='multipart',
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+		self.assertEqual(response.data['status'], StoreKYCStatus.PENDING)
 
 	def test_seller_can_attach_kyc_document_through_submit_endpoint(self):
 		store = self.create_store()
