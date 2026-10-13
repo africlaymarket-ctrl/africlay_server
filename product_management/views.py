@@ -1,5 +1,6 @@
-from rest_framework import generics, permissions
+from rest_framework import generics, permissions, status
 from rest_framework.exceptions import MethodNotAllowed, PermissionDenied, ValidationError
+from rest_framework.response import Response
 from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404
 
@@ -8,7 +9,10 @@ from core.services import require_approved_kyc_for_publication
 from store_management.models import Store, StoreKYCStatus, StoreStatus
 
 from .models import Category, Product, ProductImage, ProductStatus, Tag
-from .serializers import CategorySerializer, ProductImageSerializer, ProductSerializer, TagSerializer
+from .serializers import (
+    CategorySerializer, ProductImageSerializer, ProductSerializer,
+    SellerCategoryPathSerializer, TagSerializer,
+)
 
 
 class CategoryListCreateView(generics.ListCreateAPIView):
@@ -25,6 +29,24 @@ class CategoryDetailView(generics.RetrieveUpdateAPIView):
 
     def get_permissions(self):
         return [permissions.AllowAny()] if self.request.method == 'GET' else [IsAdminRole()]
+
+
+class SellerCategoryPathCreateView(generics.GenericAPIView):
+    serializer_class = SellerCategoryPathSerializer
+    permission_classes = [IsSeller, IsVerifiedUser]
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        result = serializer.save()
+        return Response(
+            {
+                'parent': CategorySerializer(result['parent']).data,
+                'child': CategorySerializer(result['child']).data,
+                'created': result['created'],
+            },
+            status=status.HTTP_201_CREATED if result['created'] else status.HTTP_200_OK,
+        )
 
 
 class TagListCreateView(generics.ListCreateAPIView):

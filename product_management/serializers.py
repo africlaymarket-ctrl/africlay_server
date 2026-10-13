@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+from django.db import transaction
+from django.utils.text import slugify
 from rest_framework import serializers
 
 from .models import Category, Product, ProductImage, Tag
@@ -10,6 +12,81 @@ class CategorySerializer(serializers.ModelSerializer):
         model = Category
         fields = ['id', 'name', 'slug', 'description', 'parent', 'display_order', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class SellerCategoryPathSerializer(serializers.Serializer):
+    parent = serializers.PrimaryKeyRelatedField(
+        queryset=Category.objects.filter(parent__isnull=True),
+        required=False,
+    )
+    parent_name = serializers.CharField(max_length=100, required=False, allow_blank=True, trim_whitespace=True)
+    child_name = serializers.CharField(max_length=100, trim_whitespace=True)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        parent = attrs.get('parent')
+        parent_name = ' '.join(attrs.get('parent_name', '').split())
+        child_name = ' '.join(attrs['child_name'].split())
+        if bool(parent) == bool(parent_name):
+            raise serializers.ValidationError({
+                'parent': 'Choose an existing main category or enter a new one.',
+            })
+        if parent_name and parent_name.casefold() == child_name.casefold():
+            raise serializers.ValidationError({
+                'child_name': 'The child category must be different from the main category.',
+            })
+        attrs['parent_name'] = parent_name
+        attrs['child_name'] = child_name
+        return attrs
+
+    @staticmethod
+    def _slug_for(name):
+        base = slugify(name)[:110] or 'category'
+        slug = base
+        suffix = 2
+        while Category.objects.filter(slug=slug).exists():
+            ending = f'-{suffix}'
+            slug = f'{base[:120 - len(ending)]}{ending}'
+            suffix += 1
+        return slug
+
+    def create(self, validated_data):
+        with transaction.atomic():
+            parent = validated_data.get('parent')
+            parent_created = False
+            if parent is None:
+                parent_name = validated_data['parent_name']
+                parent = Category.objects.select_for_update().filter(name__iexact=parent_name).first()
+                if parent and parent.parent_id:
+                    raise serializers.ValidationError({
+                        'parent_name': 'That name is already used by a child category.',
+                    })
+                if parent is None:
+                    parent = Category.objects.create(
+                        name=parent_name,
+                        slug=self._slug_for(parent_name),
+                    )
+                    parent_created = True
+
+            child_name = validated_data['child_name']
+            child = Category.objects.select_for_update().filter(name__iexact=child_name).first()
+            if child and child.parent_id != parent.id:
+                raise serializers.ValidationError({
+                    'child_name': 'That category already exists under a different main category.',
+                })
+            child_created = child is None
+            if child is None:
+                child = Category.objects.create(
+                    name=child_name,
+                    slug=self._slug_for(child_name),
+                    parent=parent,
+                )
+
+        return {
+            'parent': parent,
+            'child': child,
+            'created': parent_created or child_created,
+        }
 
 
 class TagSerializer(serializers.ModelSerializer):

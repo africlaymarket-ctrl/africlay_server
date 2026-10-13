@@ -3,6 +3,7 @@ from django.urls import path
 from .views import (
 	CategoryDetailView, CategoryListCreateView, ProductDetailView, ProductImageListCreateView,
     ProductListView, ProductManageListCreateView, TagDetailView, TagListCreateView,
+    SellerCategoryPathCreateView,
 )
 
 
@@ -10,6 +11,7 @@ app_name = 'product_management'
 
 urlpatterns = [
 	path('categories/', CategoryListCreateView.as_view(), name='category-list'),
+	path('categories/path/', SellerCategoryPathCreateView.as_view(), name='seller-category-path-create'),
 	path('categories/<uuid:pk>/', CategoryDetailView.as_view(), name='category-detail'),
 	path('tags/', TagListCreateView.as_view(), name='tag-list'),
 	path('tags/<uuid:pk>/', TagDetailView.as_view(), name='tag-detail'),

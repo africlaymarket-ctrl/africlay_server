@@ -188,6 +188,50 @@ class ProductApiTests(TestCase):
 		self.assertEqual(str(response.data['category']), category_response.data['id'])
 		self.assertEqual([str(tag_id) for tag_id in response.data['tags']], [tag_response.data['id']])
 
+	def test_verified_seller_can_create_main_and_child_category_path(self):
+		self.authenticate_as(self.seller)
+
+		response = self.client.post(
+			reverse('product_management:seller-category-path-create'),
+			{'parent_name': 'Farm and Agriculture', 'child_name': 'Irrigation Equipment'},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+		self.assertTrue(response.data['created'])
+		self.assertIsNone(response.data['parent']['parent'])
+		self.assertEqual(str(response.data['child']['parent']), response.data['parent']['id'])
+		self.assertTrue(Category.objects.filter(name='Irrigation Equipment', parent__name='Farm and Agriculture').exists())
+
+	def test_seller_category_path_reuses_existing_categories(self):
+		parent = Category.objects.create(name='Agriculture', slug='agriculture')
+		child = Category.objects.create(name='Farm Tools', slug='farm-tools', parent=parent)
+		category_count = Category.objects.count()
+		self.authenticate_as(self.seller)
+
+		response = self.client.post(
+			reverse('product_management:seller-category-path-create'),
+			{'parent': str(parent.id), 'child_name': 'farm tools'},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertFalse(response.data['created'])
+		self.assertEqual(response.data['child']['id'], str(child.id))
+		self.assertEqual(Category.objects.count(), category_count)
+
+	def test_buyer_cannot_create_category_path(self):
+		buyer = create_verified_user(UserRole.BUYER, 'category-buyer')
+		self.authenticate_as(buyer)
+
+		response = self.client.post(
+			reverse('product_management:seller-category-path-create'),
+			{'parent_name': 'Home', 'child_name': 'Lighting'},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
 	def test_seller_can_upload_product_image_through_endpoint(self):
 		self.authenticate_as(self.seller)
 		product_response = self.client.post(
