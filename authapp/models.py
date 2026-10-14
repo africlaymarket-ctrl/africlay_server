@@ -14,6 +14,17 @@ class UserRole(models.TextChoices):
     SUPER_ADMIN = 'super_admin', 'Super Admin'
 
 
+class StaffRole(models.TextChoices):
+    SALES_REVIEWER = 'sales_reviewer', 'Sales reviewer'
+    FINANCE = 'finance', 'Finance'
+
+
+class DashboardAccessRequestStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending'
+    APPROVED = 'approved', 'Approved'
+    REJECTED = 'rejected', 'Rejected'
+
+
 class CustomUserManager(BaseUserManager):
     def create_user(self, email, password=None, **extra_fields):
         if not email:
@@ -55,6 +66,7 @@ class User(TimestampedModel, AbstractBaseUser, PermissionsMixin):
     is_verified = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
+    auth_version = models.PositiveIntegerField(default=0)
 
     date_joined = models.DateTimeField(auto_now_add=True)
     last_login = models.DateTimeField(blank=True, null=True)
@@ -95,7 +107,102 @@ class User(TimestampedModel, AbstractBaseUser, PermissionsMixin):
 
     @property
     def is_admin_role(self):
-        return self.role in [UserRole.ADMIN, UserRole.SUPER_ADMIN] or self.is_staff or self.is_superuser
+        return self.role == UserRole.SUPER_ADMIN or self.is_superuser
+
+    @property
+    def is_super_admin(self):
+        return self.role == UserRole.SUPER_ADMIN or self.is_superuser
+
+    def has_staff_role(self, role):
+        return self.is_super_admin or self.staff_role_assignments.filter(role=role).exists()
+
+
+class UserStaffRole(TimestampedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='staff_role_assignments')
+    role = models.CharField(max_length=30, choices=StaffRole.choices)
+    granted_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='granted_staff_roles',
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'role'], name='unique_user_staff_role'),
+        ]
+        ordering = ['role']
+
+    def __str__(self):
+        return f'{self.user.email}: {self.role}'
+
+
+class DashboardAccessRequest(TimestampedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    requester = models.ForeignKey(User, on_delete=models.CASCADE, related_name='dashboard_access_requests')
+    requested_role = models.CharField(max_length=30, choices=StaffRole.choices)
+    request_reason = models.TextField()
+    status = models.CharField(
+        max_length=20,
+        choices=DashboardAccessRequestStatus.choices,
+        default=DashboardAccessRequestStatus.PENDING,
+        db_index=True,
+    )
+    reviewed_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reviewed_dashboard_access_requests',
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_reason = models.TextField(blank=True, default='')
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['requester', 'requested_role'],
+                condition=models.Q(status=DashboardAccessRequestStatus.PENDING),
+                name='unique_pending_dashboard_access_request',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.requester.email}: {self.requested_role} ({self.status})'
+
+
+class AdminAuditLog(TimestampedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    actor = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='admin_audit_actions',
+    )
+    action = models.CharField(max_length=80, db_index=True)
+    target_type = models.CharField(max_length=50, db_index=True)
+    target_id = models.CharField(max_length=100, db_index=True)
+    reason = models.TextField(blank=True, default='')
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        indexes = [models.Index(fields=['target_type', 'target_id', 'created_at'])]
+
+    def save(self, *args, **kwargs):
+        if self.pk and AdminAuditLog.objects.filter(pk=self.pk).exists():
+            raise ValueError('Administrative audit records are append-only.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValueError('Administrative audit records are append-only.')
+
+    def __str__(self):
+        return f'{self.action} {self.target_type}:{self.target_id}'
 
 
 class UserProfile(TimestampedModel):

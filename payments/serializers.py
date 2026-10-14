@@ -1,16 +1,62 @@
 import re
+from decimal import Decimal, InvalidOperation
+
+from django.conf import settings
 from rest_framework import serializers
 
-from .models import Payment, PaymentAttempt, PaymentPurpose, Wallet, WalletTransaction
+from .models import (
+    LedgerEntry, Payment, PaymentAttempt, PaymentPurpose, Payout, PayoutAccount, PayoutStatus,
+    Wallet, WalletTransaction,
+)
+
+
+def normalize_kenyan_phone(value):
+    normalized = re.sub(r'[\s-]', '', str(value))
+    if normalized.startswith('+'):
+        normalized = normalized[1:]
+    if not re.fullmatch(r'254(?:7\d{8}|1\d{8})', normalized):
+        raise serializers.ValidationError(
+            'Enter a Kenyan mobile number in 2547XXXXXXXX or 2541XXXXXXXX format.',
+        )
+    return normalized
+
+
+def masked_phone(value):
+    return f'{value[:5]}***{value[-3:]}' if value else ''
 
 
 class WalletSerializer(serializers.ModelSerializer):
     available_balance = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    pending_payout_balance = serializers.SerializerMethodField()
+    order_held_balance = serializers.SerializerMethodField()
+    minimum_payout = serializers.SerializerMethodField()
 
     class Meta:
         model = Wallet
-        fields = ['id', 'currency', 'balance', 'held_balance', 'available_balance', 'is_frozen', 'created_at']
-        read_only_fields = ['id', 'balance', 'held_balance', 'available_balance', 'is_frozen', 'created_at']
+        fields = [
+            'id', 'currency', 'balance', 'held_balance', 'available_balance',
+            'pending_payout_balance', 'order_held_balance', 'minimum_payout',
+            'is_frozen', 'created_at',
+        ]
+        read_only_fields = fields
+
+    def get_pending_payout_balance(self, wallet) -> Decimal:
+        return sum(
+            (payout.amount for payout in wallet.payouts.filter(
+                status__in=[PayoutStatus.REQUESTED, PayoutStatus.PROCESSING, PayoutStatus.UNKNOWN],
+            )),
+            Decimal('0.00'),
+        )
+
+    def get_order_held_balance(self, wallet) -> Decimal:
+        pending = self.get_pending_payout_balance(wallet)
+        return max(wallet.held_balance - pending, Decimal('0.00'))
+
+    def get_minimum_payout(self, wallet) -> Decimal:
+        try:
+            return Decimal(str(settings.SELLER_MIN_PAYOUT))
+        except (InvalidOperation, TypeError, ValueError):
+            return Decimal('500.00')
 
 
 class WalletCreateSerializer(serializers.ModelSerializer):
@@ -45,12 +91,7 @@ class MpesaStkPushSerializer(serializers.Serializer):
         return value
 
     def validate_phone_number(self, value):
-        normalized = re.sub(r'[\s-]', '', value)
-        if normalized.startswith('+'):
-            normalized = normalized[1:]
-        if not re.fullmatch(r'254(?:7\d{8}|1\d{8})', normalized):
-            raise serializers.ValidationError('Enter a Kenyan mobile number in 2547XXXXXXXX or 2541XXXXXXXX format.')
-        return normalized
+        return normalize_kenyan_phone(value)
 
 
 class PaymentAttemptSerializer(serializers.ModelSerializer):
@@ -95,3 +136,113 @@ class PaymentSerializer(serializers.ModelSerializer):
             'checkout_request_id', 'receipt_number',
         ]
         read_only_fields = fields
+
+
+class FinanceTransactionSerializer(serializers.ModelSerializer):
+    order_id = serializers.UUIDField(read_only=True)
+    payment_id = serializers.UUIDField(read_only=True, allow_null=True)
+    user_id = serializers.UUIDField(read_only=True, allow_null=True)
+    user_email = serializers.EmailField(source='user.email', read_only=True, allow_null=True)
+    provider = serializers.CharField(source='payment.provider', read_only=True, allow_null=True)
+    payment_status = serializers.CharField(source='payment.status', read_only=True, allow_null=True)
+    receipt_number = serializers.CharField(source='payment.receipt_number', read_only=True, allow_null=True)
+
+    class Meta:
+        model = LedgerEntry
+        fields = [
+            'id', 'entry_type', 'amount', 'currency', 'reference', 'order_id',
+            'payment_id', 'user_id', 'user_email', 'provider', 'payment_status',
+            'receipt_number', 'created_at',
+        ]
+        read_only_fields = fields
+
+
+class PayoutAccountSerializer(serializers.ModelSerializer):
+    phone_number = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PayoutAccount
+        fields = [
+            'id', 'provider', 'phone_number', 'account_name', 'is_active',
+            'confirmed_at', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_phone_number(self, account) -> str:
+        return masked_phone(account.phone_number)
+
+
+class PayoutAccountUpdateSerializer(serializers.Serializer):
+    phone_number = serializers.CharField(max_length=20)
+    current_password = serializers.CharField(write_only=True, trim_whitespace=False)
+
+    def validate_phone_number(self, value):
+        return normalize_kenyan_phone(value)
+
+    def validate_current_password(self, value):
+        user = self.context['request'].user
+        if not user.check_password(value):
+            raise serializers.ValidationError('The account password is incorrect.')
+        return value
+
+
+class PayoutRequestSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=14, decimal_places=2)
+
+    def validate_amount(self, value):
+        try:
+            minimum = Decimal(str(settings.SELLER_MIN_PAYOUT))
+        except (InvalidOperation, TypeError, ValueError):
+            minimum = Decimal('500.00')
+        if value != value.to_integral_value():
+            raise serializers.ValidationError('M-Pesa payouts must be requested in whole KES amounts.')
+        if value < minimum:
+            raise serializers.ValidationError(f'The minimum payout is KSh {minimum:,.0f}.')
+        return value
+
+
+class PayoutSerializer(serializers.ModelSerializer):
+    destination_phone = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Payout
+        fields = [
+            'id', 'provider', 'amount', 'currency', 'status', 'destination_phone',
+            'destination_name', 'transaction_receipt', 'failure_message',
+            'created_at', 'updated_at', 'processed_at',
+        ]
+        read_only_fields = fields
+
+    def get_destination_phone(self, payout) -> str:
+        return masked_phone(payout.destination_phone)
+
+
+class AdminPayoutSerializer(PayoutSerializer):
+    seller_id = serializers.UUIDField(source='wallet.user_id', read_only=True)
+    seller_email = serializers.EmailField(source='wallet.user.email', read_only=True)
+    seller_name = serializers.CharField(source='wallet.user.full_name', read_only=True)
+    store_name = serializers.SerializerMethodField()
+    resolution_note = serializers.CharField(read_only=True)
+
+    class Meta(PayoutSerializer.Meta):
+        fields = PayoutSerializer.Meta.fields + [
+            'seller_id', 'seller_email', 'seller_name', 'store_name',
+            'resolution_note',
+        ]
+
+    def get_store_name(self, payout) -> str:
+        store = getattr(payout.wallet.user, 'store', None)
+        return getattr(store, 'name', '')
+
+
+class PayoutResolutionSerializer(serializers.Serializer):
+    resolution = serializers.ChoiceField(choices=['succeeded', 'failed'])
+    transaction_receipt = serializers.CharField(required=False, allow_blank=True, max_length=64)
+    note = serializers.CharField(max_length=500)
+
+    def validate(self, attrs):
+        if attrs['resolution'] == 'succeeded' and not attrs.get('transaction_receipt', '').strip():
+            raise serializers.ValidationError({
+                'transaction_receipt': 'Enter the M-Pesa receipt before marking this payout as paid.',
+            })
+        return attrs

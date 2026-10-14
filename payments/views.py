@@ -1,11 +1,17 @@
 import hashlib
+import csv
 import logging
 import secrets
+import uuid
 from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
+from django.db.models import Q, Sum
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
+from django.utils.dateparse import parse_date
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
 from requests import RequestException, Timeout
@@ -17,24 +23,40 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import UserRateThrottle
 
-from authapp.permissions import IsBuyer
+from authapp.models import AdminAuditLog
+from authapp.permissions import IsBuyer, IsFinance, IsSeller, IsSuperAdmin, IsVerifiedUser
 from shopping.models import Order, OrderStatus, PaymentOption
+from store_management.models import StoreKYCStatus
 
-from .gateways.mpesa import MpesaConfigurationError, MpesaGateway, MpesaGatewayError, initiate_stk_push, validate_callback_signature
+from .gateways.mpesa import (
+    MpesaB2CGateway, MpesaConfigurationError, MpesaGateway, MpesaGatewayError,
+    initiate_stk_push, validate_callback_signature,
+)
 from .models import (
     Payment, PaymentAttempt, PaymentAttemptStatus, PaymentPurpose, PaymentStatus,
-    Wallet, WalletTransaction,
+    LedgerEntry, LedgerEntryType, Payout, PayoutAccount, PayoutStatus, Wallet,
+    WalletTransaction,
 )
 from .serializers import (
+    AdminPayoutSerializer,
+    FinanceTransactionSerializer,
     MpesaStkPushSerializer,
     PaymentInitiateSerializer,
     PaymentAttemptSerializer,
     PaymentSerializer,
+    PayoutAccountSerializer,
+    PayoutAccountUpdateSerializer,
+    PayoutRequestSerializer,
+    PayoutResolutionSerializer,
+    PayoutSerializer,
     WalletCreateSerializer,
     WalletSerializer,
     WalletTransactionSerializer,
 )
-from .services import PaymentService, WalletOperationError, credit_wallet
+from .services import (
+    PaymentService, WalletOperationError, credit_wallet, place_escrow_hold,
+    resolve_payout,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -72,6 +94,466 @@ class WalletTransactionListView(generics.ListAPIView):
             wallet_id=self.kwargs['wallet_id'],
             wallet__user=self.request.user,
         )
+
+
+def require_payout_eligible_seller(user):
+    store = getattr(user, 'store', None)
+    kyc = getattr(store, 'kyc', None) if store else None
+    if not store or not kyc or kyc.status != StoreKYCStatus.APPROVED:
+        raise ValidationError({
+            'payout': 'Your store verification must be approved before requesting payouts.',
+        })
+    return store
+
+
+class PayoutThrottle(UserRateThrottle):
+    rate = '5/day'
+
+
+def update_pending_payout(payout, *, payout_status, failure_code='', failure_message='', provider_response=None):
+    with transaction.atomic():
+        locked = Payout.objects.select_for_update().get(pk=payout.pk)
+        if locked.status in {PayoutStatus.SUCCEEDED, PayoutStatus.FAILED}:
+            return locked
+        locked.status = payout_status
+        locked.failure_code = str(failure_code)[:40]
+        locked.failure_message = str(failure_message)[:255]
+        update_fields = ['status', 'failure_code', 'failure_message', 'updated_at']
+        if provider_response is not None:
+            locked.provider_response = provider_response
+            update_fields.append('provider_response')
+        locked.save(update_fields=update_fields)
+        return locked
+
+
+class PayoutAccountView(generics.GenericAPIView):
+    serializer_class = PayoutAccountSerializer
+    permission_classes = [IsAuthenticated, IsVerifiedUser, IsSeller]
+
+    @extend_schema(responses=PayoutAccountSerializer)
+    def get(self, request, *args, **kwargs):
+        require_payout_eligible_seller(request.user)
+        account = PayoutAccount.objects.filter(user=request.user).first()
+        return Response(PayoutAccountSerializer(account).data if account else None)
+
+    @extend_schema(request=PayoutAccountUpdateSerializer, responses=PayoutAccountSerializer)
+    def put(self, request, *args, **kwargs):
+        require_payout_eligible_seller(request.user)
+        serializer = PayoutAccountUpdateSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        phone_number = serializer.validated_data['phone_number']
+        existing = PayoutAccount.objects.filter(user=request.user).first()
+        if existing and existing.phone_number != phone_number and Payout.objects.filter(
+            payout_account=existing,
+            status__in=[PayoutStatus.REQUESTED, PayoutStatus.PROCESSING, PayoutStatus.UNKNOWN],
+        ).exists():
+            raise ValidationError({
+                'phone_number': 'Wait for the active payout to be resolved before changing this number.',
+            })
+        account, _ = PayoutAccount.objects.update_or_create(
+            user=request.user,
+            defaults={
+                'phone_number': phone_number,
+                'account_name': request.user.full_name,
+                'is_active': True,
+                'confirmed_at': timezone.now(),
+            },
+        )
+        return Response(PayoutAccountSerializer(account).data)
+
+
+class PayoutListCreateView(generics.GenericAPIView):
+    serializer_class = PayoutSerializer
+    permission_classes = [IsAuthenticated, IsVerifiedUser, IsSeller]
+    pagination_class = WalletTransactionPagination
+
+    def get_throttles(self):
+        return [PayoutThrottle()] if self.request.method == 'POST' else []
+
+    def get(self, request, *args, **kwargs):
+        payouts = Payout.objects.filter(wallet__user=request.user).select_related('payout_account')
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(payouts, request, view=self)
+        return paginator.get_paginated_response(PayoutSerializer(page, many=True).data)
+
+    @extend_schema(request=PayoutRequestSerializer, responses=PayoutSerializer)
+    def post(self, request, *args, **kwargs):
+        require_payout_eligible_seller(request.user)
+        serializer = PayoutRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        amount = serializer.validated_data['amount']
+        idempotency_key = request.headers.get('Idempotency-Key', '').strip()
+        if not idempotency_key or len(idempotency_key) > 100:
+            raise ValidationError({'Idempotency-Key': 'A key of 1 to 100 characters is required.'})
+
+        account = PayoutAccount.objects.filter(user=request.user, is_active=True).first()
+        if account is None:
+            raise ValidationError({'payout_account': 'Add an M-Pesa payout number before requesting a payout.'})
+
+        callback_token = secrets.token_urlsafe(32)
+        with transaction.atomic():
+            wallet, _ = Wallet.objects.get_or_create(user=request.user, currency='KES')
+            wallet = Wallet.objects.select_for_update().get(pk=wallet.pk)
+            existing = Payout.objects.filter(wallet=wallet, idempotency_key=idempotency_key).first()
+            if existing:
+                if existing.amount != amount or existing.payout_account_id != account.pk:
+                    return Response(
+                        {'detail': 'Idempotency key was already used with different payout details.'},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                return Response(PayoutSerializer(existing).data)
+            if wallet.is_frozen:
+                raise ValidationError({'wallet': 'Wallet activity is temporarily unavailable.'})
+            if wallet.available_balance < amount:
+                raise ValidationError({'amount': 'The requested amount exceeds your available balance.'})
+
+            payout = Payout.objects.create(
+                wallet=wallet,
+                payout_account=account,
+                amount=amount,
+                currency=wallet.currency,
+                destination_phone=account.phone_number,
+                destination_name=account.account_name,
+                idempotency_key=idempotency_key,
+                callback_token_hash=hashlib.sha256(callback_token.encode()).hexdigest(),
+                originator_conversation_id=f'AFRICLAY-{uuid.uuid4().hex}',
+            )
+            place_escrow_hold(wallet, amount, f'payout:{payout.pk}:reserve')
+
+        try:
+            provider_response = MpesaB2CGateway().initiate_payout(
+                payout=payout,
+                callback_token=callback_token,
+            )
+        except MpesaConfigurationError as error:
+            logger.error('M-Pesa B2C configuration failure reason=%s', str(error))
+            payout = resolve_payout(
+                payout,
+                succeeded=False,
+                failure_code='configuration_error',
+                failure_message='Seller payouts are temporarily unavailable.',
+            )
+            return Response(PayoutSerializer(payout).data, status=status.HTTP_201_CREATED)
+        except Timeout:
+            payout = update_pending_payout(
+                payout,
+                payout_status=PayoutStatus.UNKNOWN,
+                failure_code='provider_timeout',
+                failure_message='The provider result needs reconciliation.',
+            )
+            return Response(PayoutSerializer(payout).data, status=status.HTTP_202_ACCEPTED)
+        except MpesaGatewayError as error:
+            logger.warning(
+                'M-Pesa B2C failure stage=%s status=%s provider_code=%s provider_reason=%s',
+                error.stage or 'unknown', error.status_code or 'none',
+                error.provider_code or 'none', error.provider_reason or 'none',
+            )
+            if error.status_code and 400 <= error.status_code < 500:
+                payout = resolve_payout(
+                    payout,
+                    succeeded=False,
+                    failure_code=error.provider_code or 'provider_rejected',
+                    failure_message='M-Pesa did not accept this payout request.',
+                )
+                return Response(PayoutSerializer(payout).data, status=status.HTTP_201_CREATED)
+            payout = update_pending_payout(
+                payout,
+                payout_status=PayoutStatus.UNKNOWN,
+                failure_code=error.provider_code or 'provider_unavailable',
+                failure_message='The provider result needs reconciliation.',
+            )
+            return Response(PayoutSerializer(payout).data, status=status.HTTP_202_ACCEPTED)
+
+        response_code = str(provider_response.get('ResponseCode', ''))
+        if response_code != '0':
+            payout = resolve_payout(
+                payout,
+                succeeded=False,
+                provider_result=provider_response,
+                failure_code=response_code or 'provider_rejected',
+                failure_message=str(
+                    provider_response.get('ResponseDescription', 'M-Pesa did not accept this payout request.'),
+                ),
+            )
+            return Response(PayoutSerializer(payout).data, status=status.HTTP_201_CREATED)
+
+        response_originator = str(provider_response.get('OriginatorConversationID', ''))
+        conversation_id = str(provider_response.get('ConversationID', ''))
+        if response_originator and response_originator != payout.originator_conversation_id:
+            payout = update_pending_payout(
+                payout,
+                payout_status=PayoutStatus.UNKNOWN,
+                failure_code='identifier_mismatch',
+                failure_message='The provider result needs reconciliation.',
+                provider_response=provider_response,
+            )
+        elif not conversation_id:
+            payout = update_pending_payout(
+                payout,
+                payout_status=PayoutStatus.UNKNOWN,
+                failure_code='incomplete_acknowledgement',
+                failure_message='The provider result needs reconciliation.',
+                provider_response=provider_response,
+            )
+        else:
+            with transaction.atomic():
+                locked = Payout.objects.select_for_update().get(pk=payout.pk)
+                if locked.status not in {PayoutStatus.SUCCEEDED, PayoutStatus.FAILED}:
+                    locked.provider_response = provider_response
+                    locked.status = PayoutStatus.PROCESSING
+                    locked.conversation_id = conversation_id[:100]
+                    locked.failure_code = ''
+                    locked.failure_message = ''
+                    locked.save(update_fields=[
+                        'provider_response', 'status', 'conversation_id', 'failure_code',
+                        'failure_message', 'updated_at',
+                    ])
+                payout = locked
+        return Response(PayoutSerializer(payout).data, status=status.HTTP_202_ACCEPTED)
+
+
+def payout_result_parameters(result):
+    values = result.get('ResultParameters', {}).get('ResultParameter', [])
+    if not isinstance(values, list):
+        return {}
+    return {
+        str(item.get('Key')): item.get('Value')
+        for item in values
+        if isinstance(item, dict) and item.get('Key')
+    }
+
+
+class PayoutProviderResultView(generics.GenericAPIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    @extend_schema(request=OpenApiTypes.OBJECT, responses=OpenApiTypes.OBJECT)
+    def post(self, request, *args, **kwargs):
+        token_hash = hashlib.sha256(kwargs['token'].encode()).hexdigest()
+        payout = Payout.objects.filter(callback_token_hash=token_hash).first()
+        if payout is None:
+            return Response({'ResultCode': 1, 'ResultDesc': 'Invalid callback.'}, status=404)
+        result = request.data.get('Result')
+        if not isinstance(result, dict):
+            return Response({'ResultCode': 1, 'ResultDesc': 'Invalid payout result.'}, status=400)
+        originator = str(result.get('OriginatorConversationID', ''))
+        if originator and originator != payout.originator_conversation_id:
+            return Response({'ResultCode': 1, 'ResultDesc': 'Callback does not match payout.'}, status=400)
+        conversation_id = str(result.get('ConversationID', ''))
+        if payout.conversation_id and conversation_id and conversation_id != payout.conversation_id:
+            return Response({'ResultCode': 1, 'ResultDesc': 'Callback does not match payout.'}, status=400)
+
+        result_code = str(result.get('ResultCode', ''))
+        parameters = payout_result_parameters(result)
+        try:
+            if result_code == '0':
+                callback_amount = parameters.get('TransactionAmount')
+                if callback_amount is not None:
+                    try:
+                        parsed_amount = Decimal(str(callback_amount))
+                    except (InvalidOperation, TypeError, ValueError):
+                        return Response({'ResultCode': 1, 'ResultDesc': 'Payout amount is invalid.'}, status=400)
+                    if parsed_amount != payout.amount:
+                        return Response({'ResultCode': 1, 'ResultDesc': 'Payout amount does not match.'}, status=400)
+                receipt = str(parameters.get('TransactionReceipt') or result.get('TransactionID') or '').strip()
+                payout = resolve_payout(
+                    payout,
+                    succeeded=True,
+                    provider_result=request.data,
+                    transaction_receipt=receipt,
+                )
+            else:
+                payout = resolve_payout(
+                    payout,
+                    succeeded=False,
+                    provider_result=request.data,
+                    failure_code=result_code or 'provider_failed',
+                    failure_message=str(result.get('ResultDesc', 'M-Pesa payout was not completed.')),
+                )
+        except (IntegrityError, WalletOperationError) as error:
+            logger.error('Unable to finalize payout %s: %s', payout.pk, str(error))
+            return Response({'ResultCode': 1, 'ResultDesc': 'Payout could not be finalized.'}, status=409)
+        return Response({'ResultCode': 0, 'ResultDesc': 'Payout result accepted.', 'PayoutId': str(payout.pk)})
+
+
+class PayoutProviderTimeoutView(generics.GenericAPIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    @extend_schema(request=OpenApiTypes.OBJECT, responses=OpenApiTypes.OBJECT)
+    def post(self, request, *args, **kwargs):
+        token_hash = hashlib.sha256(kwargs['token'].encode()).hexdigest()
+        with transaction.atomic():
+            payout = Payout.objects.select_for_update().filter(callback_token_hash=token_hash).first()
+            if payout is None:
+                return Response({'ResultCode': 1, 'ResultDesc': 'Invalid callback.'}, status=404)
+            if payout.status not in {PayoutStatus.SUCCEEDED, PayoutStatus.FAILED}:
+                payout.status = PayoutStatus.UNKNOWN
+                payout.provider_result = request.data if isinstance(request.data, dict) else {}
+                payout.failure_code = 'queue_timeout'
+                payout.failure_message = 'The provider result needs reconciliation.'
+                payout.save(update_fields=[
+                    'status', 'provider_result', 'failure_code', 'failure_message', 'updated_at',
+                ])
+        return Response({'ResultCode': 0, 'ResultDesc': 'Timeout accepted.'})
+
+
+class AdminPayoutListView(generics.ListAPIView):
+    serializer_class = AdminPayoutSerializer
+    permission_classes = [IsAuthenticated, IsFinance]
+    pagination_class = WalletTransactionPagination
+
+    def get_queryset(self):
+        queryset = Payout.objects.select_related(
+            'wallet__user', 'wallet__user__store', 'payout_account', 'resolved_by',
+        )
+        payout_status = self.request.query_params.get('status', '').strip()
+        if payout_status in PayoutStatus.values:
+            queryset = queryset.filter(status=payout_status)
+        search = self.request.query_params.get('search', '').strip()
+        if search:
+            queryset = queryset.filter(
+                Q(wallet__user__email__icontains=search)
+                | Q(wallet__user__store__name__icontains=search)
+                | Q(transaction_receipt__icontains=search),
+            )
+        return queryset
+
+
+class AdminFinanceSummaryView(generics.GenericAPIView):
+    serializer_class = AdminPayoutSerializer
+    permission_classes = [IsAuthenticated, IsFinance]
+
+    @extend_schema(responses=OpenApiTypes.OBJECT)
+    def get(self, request, *args, **kwargs):
+        wallet_totals = Wallet.objects.aggregate(
+            liability=Sum('balance'),
+            reserved=Sum('held_balance'),
+        )
+        payout_totals = Payout.objects.aggregate(
+            completed=Sum('amount', filter=Q(status=PayoutStatus.SUCCEEDED)),
+            pending=Sum('amount', filter=Q(status__in=[
+                PayoutStatus.REQUESTED, PayoutStatus.PROCESSING, PayoutStatus.UNKNOWN,
+            ])),
+        )
+        ledger_totals = LedgerEntry.objects.aggregate(
+            commission=Sum('amount', filter=Q(entry_type=LedgerEntryType.COMMISSION_EARNED)),
+            seller_released=Sum('amount', filter=Q(entry_type=LedgerEntryType.SELLER_PROCEEDS_RELEASE)),
+        )
+        zero = Decimal('0.00')
+        return Response({
+            'wallet_liability': wallet_totals['liability'] or zero,
+            'wallet_reserved': wallet_totals['reserved'] or zero,
+            'commission_earned': ledger_totals['commission'] or zero,
+            'seller_proceeds_released': ledger_totals['seller_released'] or zero,
+            'payouts_pending': payout_totals['pending'] or zero,
+            'payouts_completed': payout_totals['completed'] or zero,
+            'needs_reconciliation': Payout.objects.filter(status=PayoutStatus.UNKNOWN).count(),
+        })
+
+
+class AdminPayoutResolveView(generics.GenericAPIView):
+    serializer_class = PayoutResolutionSerializer
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+
+    @extend_schema(request=PayoutResolutionSerializer, responses=AdminPayoutSerializer)
+    def post(self, request, *args, **kwargs):
+        serializer = PayoutResolutionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payout = get_object_or_404(Payout, pk=kwargs['pk'])
+        if payout.status not in {PayoutStatus.PROCESSING, PayoutStatus.UNKNOWN}:
+            raise ValidationError({'status': 'Only processing or unreconciled payouts can be resolved manually.'})
+        succeeded = serializer.validated_data['resolution'] == 'succeeded'
+        try:
+            payout = resolve_payout(
+                payout,
+                succeeded=succeeded,
+                transaction_receipt=serializer.validated_data.get('transaction_receipt', ''),
+                failure_code='' if succeeded else 'admin_reconciled_failed',
+                failure_message='' if succeeded else 'Payout was not completed by M-Pesa.',
+                resolved_by=request.user,
+                resolution_note=serializer.validated_data['note'],
+            )
+        except (IntegrityError, WalletOperationError) as error:
+            raise ValidationError({'payout': str(error)}) from error
+        AdminAuditLog.objects.create(
+            actor=request.user,
+            action='payout_reconciled',
+            target_type='payout',
+            target_id=str(payout.pk),
+            reason=serializer.validated_data['note'],
+            metadata={
+                'resolution': serializer.validated_data['resolution'],
+                'has_receipt': bool(serializer.validated_data.get('transaction_receipt')),
+            },
+        )
+        return Response(AdminPayoutSerializer(payout).data)
+
+
+def finance_transactions(request):
+    queryset = LedgerEntry.objects.select_related('order', 'payment', 'user')
+    search = request.query_params.get('search', '').strip()
+    if search:
+        queryset = queryset.filter(
+            Q(reference__icontains=search)
+            | Q(order_id__icontains=search)
+            | Q(payment_id__icontains=search)
+            | Q(payment__receipt_number__icontains=search)
+            | Q(user__email__icontains=search)
+        )
+    entry_type = request.query_params.get('entry_type', '').strip()
+    if entry_type in LedgerEntryType.values:
+        queryset = queryset.filter(entry_type=entry_type)
+    provider = request.query_params.get('provider', '').strip()
+    if provider:
+        queryset = queryset.filter(payment__provider=provider)
+    payment_status = request.query_params.get('payment_status', '').strip()
+    if payment_status in PaymentStatus.values:
+        queryset = queryset.filter(payment__status=payment_status)
+    date_from = parse_date(request.query_params.get('date_from', '').strip())
+    if date_from:
+        queryset = queryset.filter(created_at__date__gte=date_from)
+    date_to = parse_date(request.query_params.get('date_to', '').strip())
+    if date_to:
+        queryset = queryset.filter(created_at__date__lte=date_to)
+    return queryset.order_by('-created_at', '-id')
+
+
+class FinanceTransactionListView(generics.ListAPIView):
+    serializer_class = FinanceTransactionSerializer
+    permission_classes = [IsAuthenticated, IsFinance]
+    pagination_class = WalletTransactionPagination
+
+    def get_queryset(self):
+        return finance_transactions(self.request)
+
+
+class FinanceTransactionDetailView(generics.RetrieveAPIView):
+    serializer_class = FinanceTransactionSerializer
+    permission_classes = [IsAuthenticated, IsFinance]
+    queryset = LedgerEntry.objects.select_related('order', 'payment', 'user')
+
+
+class FinanceTransactionExportView(generics.GenericAPIView):
+    serializer_class = FinanceTransactionSerializer
+    permission_classes = [IsAuthenticated, IsFinance]
+
+    def get(self, request, *args, **kwargs):
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = 'attachment; filename="africlay-finance-transactions.csv"'
+        writer = csv.writer(response)
+        writer.writerow([
+            'created_at', 'entry_type', 'amount', 'currency', 'reference', 'order_id',
+            'payment_id', 'user_email', 'provider', 'payment_status', 'receipt_number',
+        ])
+        for entry in finance_transactions(request)[:10000]:
+            writer.writerow([
+                entry.created_at.isoformat(), entry.entry_type, entry.amount, entry.currency,
+                entry.reference, entry.order_id, entry.payment_id,
+                entry.user.email if entry.user else '', entry.payment.provider if entry.payment else '',
+                entry.payment.status if entry.payment else '', entry.payment.receipt_number if entry.payment else '',
+            ])
+        return response
 
 
 class MpesaStkThrottle(UserRateThrottle):

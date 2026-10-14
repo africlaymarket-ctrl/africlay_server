@@ -49,6 +49,9 @@ class JWTAuthentication(BaseAuthentication):
         if not user.is_active:
             raise AuthenticationFailed('User account is inactive.')
 
+        if payload.get('auth_version', 0) != user.auth_version:
+            raise AuthenticationFailed('Session permissions have changed. Please log in again.')
+
         return (user, payload)
 
     def authenticate_header(self, request):

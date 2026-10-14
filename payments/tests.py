@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -25,10 +26,13 @@ from shopping.models import (
     PaymentMethod as OrderPaymentMethod,
     PaymentStatus as OrderPaymentStatus,
 )
-from store_management.models import Store
+from store_management.models import Store, StoreKYC, StoreKYCStatus
 
-from payments.gateways.mpesa import MpesaGateway
-from payments.models import PaymentAttempt, Wallet, WalletTransaction
+from payments.gateways.mpesa import MpesaB2CGateway, MpesaGateway
+from payments.models import (
+    PaymentAttempt, Payout, PayoutAccount, PayoutStatus, Wallet,
+    WalletTransaction, WalletTransactionType,
+)
 from payments.services import (
     PaymentService,
     WalletOperationError,
@@ -37,10 +41,327 @@ from payments.services import (
     debit_wallet,
     place_escrow_hold,
     release_escrow_hold,
+    resolve_payout,
     transfer_escrow_to_wallet,
 )
 
 from .models import Payment, PaymentStatus
+
+
+@override_settings(
+    SELLER_MIN_PAYOUT='500.00',
+    MPESA_ENVIRONMENT='sandbox',
+    MPESA_BASE_URL='https://sandbox.safaricom.co.ke',
+    MPESA_CONSUMER_KEY='consumer-key',
+    MPESA_CONSUMER_SECRET='consumer-secret',
+    MPESA_CALLBACK_BASE_URL='https://api.africlaymarket.com',
+    MPESA_B2C_INITIATOR_NAME='testapi',
+    MPESA_B2C_SECURITY_CREDENTIAL='encrypted-credential',
+    MPESA_B2C_SHORTCODE='600000',
+)
+class SellerPayoutApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.seller = get_user_model().objects.create_user(
+            email='payout-seller@example.com',
+            password='StrongPassword123!',
+            role=UserRole.SELLER,
+            is_verified=True,
+        )
+        store = Store.objects.create(
+            owner=self.seller,
+            name='Payout Store',
+            slug='payout-store',
+            city='Nairobi',
+        )
+        StoreKYC.objects.create(
+            store=store,
+            business_name='Payout Store',
+            business_registration_number='REG-001',
+            tax_identification_number='PIN-001',
+            document_type='national_id',
+            document='kyc/test.jpg',
+            status=StoreKYCStatus.APPROVED,
+            submitted_at=timezone.now(),
+            reviewed_at=timezone.now(),
+        )
+        self.wallet = Wallet.objects.create(user=self.seller, currency='KES')
+        credit_wallet(self.wallet, Decimal('2000.00'), 'seller-opening-balance')
+        self.client.force_authenticate(self.seller)
+        response = self.client.put(
+            reverse('payments:payout-account'),
+            {
+                'phone_number': '254712345678',
+                'current_password': 'StrongPassword123!',
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
+    @patch('payments.views.MpesaB2CGateway.initiate_payout')
+    def test_payout_reserves_then_debits_funds_after_success_callback(self, initiate_payout):
+        initiate_payout.return_value = {
+            'ResponseCode': '0',
+            'OriginatorConversationID': 'ignored-in-mock',
+            'ConversationID': 'AG_123',
+            'ResponseDescription': 'Accepted',
+        }
+
+        def response_for_payout(*, payout, callback_token):
+            initiate_payout.return_value['OriginatorConversationID'] = payout.originator_conversation_id
+            return initiate_payout.return_value
+
+        initiate_payout.side_effect = response_for_payout
+        response = self.client.post(
+            reverse('payments:payout-list'),
+            {'amount': '1000.00'},
+            format='json',
+            HTTP_IDEMPOTENCY_KEY='seller-payout-001',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED, response.data)
+        self.assertEqual(response.data['status'], PayoutStatus.PROCESSING)
+        self.wallet.refresh_from_db()
+        self.assertEqual(self.wallet.balance, Decimal('2000.00'))
+        self.assertEqual(self.wallet.held_balance, Decimal('1000.00'))
+
+        callback_token = initiate_payout.call_args.kwargs['callback_token']
+        payout = Payout.objects.get(pk=response.data['id'])
+        callback = {
+            'Result': {
+                'ResultCode': 0,
+                'ResultDesc': 'Processed successfully.',
+                'OriginatorConversationID': payout.originator_conversation_id,
+                'ConversationID': 'AG_123',
+                'TransactionID': 'PAY123ABC',
+                'ResultParameters': {
+                    'ResultParameter': [
+                        {'Key': 'TransactionAmount', 'Value': 1000},
+                        {'Key': 'TransactionReceipt', 'Value': 'PAY123ABC'},
+                    ],
+                },
+            },
+        }
+        first = self.client.post(
+            reverse('payments:payout-provider-result', args=[callback_token]),
+            callback,
+            format='json',
+        )
+        repeated = self.client.post(
+            reverse('payments:payout-provider-result', args=[callback_token]),
+            callback,
+            format='json',
+        )
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK, first.data)
+        self.assertEqual(repeated.status_code, status.HTTP_200_OK, repeated.data)
+        payout.refresh_from_db()
+        self.wallet.refresh_from_db()
+        self.assertEqual(payout.status, PayoutStatus.SUCCEEDED)
+        self.assertEqual(payout.transaction_receipt, 'PAY123ABC')
+        self.assertEqual(self.wallet.balance, Decimal('1000.00'))
+        self.assertEqual(self.wallet.held_balance, Decimal('0.00'))
+        self.assertEqual(WalletTransaction.objects.filter(
+            wallet=self.wallet,
+            transaction_type=WalletTransactionType.WITHDRAWAL,
+        ).count(), 1)
+
+    @patch('payments.views.MpesaB2CGateway.initiate_payout')
+    def test_failed_provider_result_restores_available_balance(self, initiate_payout):
+        def accepted(*, payout, callback_token):
+            return {
+                'ResponseCode': '0',
+                'OriginatorConversationID': payout.originator_conversation_id,
+                'ConversationID': 'AG_FAILED',
+            }
+
+        initiate_payout.side_effect = accepted
+        response = self.client.post(
+            reverse('payments:payout-list'),
+            {'amount': '500.00'},
+            format='json',
+            HTTP_IDEMPOTENCY_KEY='seller-payout-failed',
+        )
+        callback_token = initiate_payout.call_args.kwargs['callback_token']
+        payout = Payout.objects.get(pk=response.data['id'])
+
+        callback = {'Result': {
+            'ResultCode': 2001,
+            'ResultDesc': 'The initiator information is invalid.',
+            'OriginatorConversationID': payout.originator_conversation_id,
+        }}
+        result = self.client.post(
+            reverse('payments:payout-provider-result', args=[callback_token]),
+            callback,
+            format='json',
+        )
+
+        self.assertEqual(result.status_code, status.HTTP_200_OK, result.data)
+        payout.refresh_from_db()
+        self.wallet.refresh_from_db()
+        self.assertEqual(payout.status, PayoutStatus.FAILED)
+        self.assertEqual(self.wallet.balance, Decimal('2000.00'))
+        self.assertEqual(self.wallet.held_balance, Decimal('0.00'))
+
+    @patch('payments.views.MpesaB2CGateway.initiate_payout')
+    def test_idempotency_key_does_not_reserve_twice(self, initiate_payout):
+        initiate_payout.side_effect = lambda *, payout, callback_token: {
+            'ResponseCode': '0',
+            'OriginatorConversationID': payout.originator_conversation_id,
+            'ConversationID': 'AG_IDEMPOTENT',
+        }
+        first = self.client.post(
+            reverse('payments:payout-list'),
+            {'amount': '500.00'},
+            format='json',
+            HTTP_IDEMPOTENCY_KEY='same-payout-key',
+        )
+        repeated = self.client.post(
+            reverse('payments:payout-list'),
+            {'amount': '500.00'},
+            format='json',
+            HTTP_IDEMPOTENCY_KEY='same-payout-key',
+        )
+
+        self.assertEqual(first.data['id'], repeated.data['id'])
+        self.wallet.refresh_from_db()
+        self.assertEqual(self.wallet.held_balance, Decimal('500.00'))
+        self.assertEqual(initiate_payout.call_count, 1)
+
+    @patch('payments.views.MpesaB2CGateway.initiate_payout')
+    def test_fast_provider_result_cannot_be_overwritten_by_acknowledgement(self, initiate_payout):
+        def completes_before_acknowledgement(*, payout, callback_token):
+            resolve_payout(
+                payout,
+                succeeded=True,
+                transaction_receipt='FAST123ABC',
+            )
+            return {
+                'ResponseCode': '0',
+                'OriginatorConversationID': payout.originator_conversation_id,
+                'ConversationID': 'AG_FAST',
+            }
+
+        initiate_payout.side_effect = completes_before_acknowledgement
+        response = self.client.post(
+            reverse('payments:payout-list'),
+            {'amount': '500.00'},
+            format='json',
+            HTTP_IDEMPOTENCY_KEY='fast-provider-result',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED, response.data)
+        self.assertEqual(response.data['status'], PayoutStatus.SUCCEEDED)
+        payout = Payout.objects.get(pk=response.data['id'])
+        self.wallet.refresh_from_db()
+        self.assertEqual(payout.status, PayoutStatus.SUCCEEDED)
+        self.assertEqual(payout.transaction_receipt, 'FAST123ABC')
+        self.assertEqual(self.wallet.balance, Decimal('1500.00'))
+        self.assertEqual(self.wallet.held_balance, Decimal('0.00'))
+
+    def test_payout_number_change_requires_current_password(self):
+        response = self.client.put(
+            reverse('payments:payout-account'),
+            {'phone_number': '254711111111', 'current_password': 'wrong-password'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(PayoutAccount.objects.get(user=self.seller).phone_number, '254712345678')
+
+    def test_admin_finance_endpoints_require_admin_role(self):
+        denied = self.client.get(reverse('payments:admin-finance-summary'))
+        self.assertEqual(denied.status_code, status.HTTP_403_FORBIDDEN)
+
+        admin = get_user_model().objects.create_superuser(
+            email='finance-admin@example.com',
+            password='AdminPassword123!',
+        )
+        self.client.force_authenticate(admin)
+        summary = self.client.get(reverse('payments:admin-finance-summary'))
+        payouts = self.client.get(reverse('payments:admin-payout-list'))
+
+        self.assertEqual(summary.status_code, status.HTTP_200_OK, summary.data)
+        self.assertEqual(summary.data['wallet_liability'], Decimal('2000.00'))
+        self.assertEqual(payouts.status_code, status.HTTP_200_OK, payouts.data)
+
+    def test_super_admin_can_reconcile_unknown_payout_after_provider_check(self):
+        account = PayoutAccount.objects.get(user=self.seller)
+        payout = Payout.objects.create(
+            wallet=self.wallet,
+            payout_account=account,
+            amount=Decimal('500.00'),
+            currency='KES',
+            status=PayoutStatus.UNKNOWN,
+            destination_phone=account.phone_number,
+            destination_name=account.account_name,
+            idempotency_key='manual-reconciliation',
+            callback_token_hash=hashlib.sha256(b'manual-token').hexdigest(),
+            originator_conversation_id='AFRICLAY-MANUAL-001',
+        )
+        place_escrow_hold(self.wallet, payout.amount, f'payout:{payout.pk}:reserve')
+        admin = get_user_model().objects.create_superuser(
+            email='payout-super-admin@example.com',
+            password='AdminPassword123!',
+        )
+        self.client.force_authenticate(admin)
+
+        listing = self.client.get(reverse('payments:admin-payout-list'))
+        resolution = self.client.post(
+            reverse('payments:admin-payout-resolve', args=[payout.pk]),
+            {'resolution': 'failed', 'note': 'Confirmed absent in the M-Pesa portal.'},
+            format='json',
+        )
+
+        self.assertEqual(listing.status_code, status.HTTP_200_OK, listing.data)
+        self.assertEqual(listing.data['results'][0]['seller_email'], self.seller.email)
+        self.assertEqual(resolution.status_code, status.HTTP_200_OK, resolution.data)
+        payout.refresh_from_db()
+        self.wallet.refresh_from_db()
+        self.assertEqual(payout.status, PayoutStatus.FAILED)
+        self.assertEqual(payout.resolved_by, admin)
+        self.assertEqual(self.wallet.held_balance, Decimal('0.00'))
+
+
+class MpesaB2CGatewayTests(TestCase):
+    @override_settings(
+        MPESA_ENVIRONMENT='sandbox',
+        MPESA_BASE_URL='https://sandbox.safaricom.co.ke',
+        MPESA_CONSUMER_KEY='consumer-key',
+        MPESA_CONSUMER_SECRET='consumer-secret',
+        MPESA_CALLBACK_BASE_URL='https://api.africlaymarket.com',
+        MPESA_B2C_INITIATOR_NAME='testapi',
+        MPESA_B2C_SECURITY_CREDENTIAL='encrypted-credential',
+        MPESA_B2C_SHORTCODE='600000',
+        MPESA_B2C_COMMAND_ID='BusinessPayment',
+        MPESA_B2C_PATH='/mpesa/b2c/v3/paymentrequest',
+    )
+    @patch('payments.gateways.mpesa.requests.post')
+    @patch('payments.gateways.mpesa.requests.get')
+    def test_initiate_payout_uses_b2c_credentials_and_private_callback_token(self, get, post):
+        get.return_value.json.return_value = {'access_token': 'generated-token'}
+        post.return_value.json.return_value = {
+            'ResponseCode': '0',
+            'OriginatorConversationID': 'AFRICLAY-TEST',
+            'ConversationID': 'AG_TEST',
+        }
+        payout = type('PayoutStub', (), {
+            'pk': '12345678-0000-0000-0000-000000000000',
+            'originator_conversation_id': 'AFRICLAY-TEST',
+            'destination_phone': '254712345678',
+            'amount': Decimal('500.00'),
+        })()
+
+        result = MpesaB2CGateway().initiate_payout(payout=payout, callback_token='private-token')
+
+        self.assertEqual(result['ConversationID'], 'AG_TEST')
+        self.assertEqual(post.call_args.args[0], 'https://sandbox.safaricom.co.ke/mpesa/b2c/v3/paymentrequest')
+        payload = post.call_args.kwargs['json']
+        self.assertEqual(payload['PartyA'], '600000')
+        self.assertEqual(payload['PartyB'], '254712345678')
+        self.assertEqual(payload['Amount'], 500)
+        self.assertTrue(payload['ResultURL'].endswith('/api/payments/payouts/provider-result/private-token/'))
+        self.assertTrue(payload['QueueTimeOutURL'].endswith('/api/payments/payouts/provider-timeout/private-token/'))
 
 
 class MpesaGatewayTests(TestCase):

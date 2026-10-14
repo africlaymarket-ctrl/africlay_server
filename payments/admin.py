@@ -1,6 +1,9 @@
 from django.contrib import admin
 
-from .models import LedgerEntry, Payment, PaymentAttempt, Wallet, WalletTransaction
+from .models import (
+    LedgerEntry, Payment, PaymentAttempt, Payout, PayoutAccount, Wallet,
+    WalletTransaction,
+)
 
 
 @admin.register(Wallet)
@@ -55,6 +58,58 @@ class LedgerEntryAdmin(admin.ModelAdmin):
     list_filter = ('entry_type', 'currency', 'created_at')
     search_fields = ('reference', 'order__id', 'payment__receipt_number', 'user__email')
     readonly_fields = [field.name for field in LedgerEntry._meta.fields]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(PayoutAccount)
+class PayoutAccountAdmin(admin.ModelAdmin):
+    list_display = ['user', 'provider', 'masked_phone', 'is_active', 'confirmed_at', 'updated_at']
+    list_filter = ['provider', 'is_active']
+    search_fields = ['user__email', 'account_name', 'phone_number']
+    readonly_fields = [field.name for field in PayoutAccount._meta.fields]
+
+    @admin.display(description='Phone')
+    def masked_phone(self, obj):
+        return f'{obj.phone_number[:5]}***{obj.phone_number[-3:]}'
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(Payout)
+class PayoutAdmin(admin.ModelAdmin):
+    list_display = [
+        'id', 'seller', 'amount', 'currency', 'status', 'masked_destination',
+        'transaction_receipt', 'created_at', 'processed_at',
+    ]
+    list_filter = ['provider', 'status', 'currency', 'created_at']
+    search_fields = [
+        'id', 'wallet__user__email', 'destination_name', 'destination_phone',
+        'originator_conversation_id', 'conversation_id', 'transaction_receipt',
+    ]
+    readonly_fields = [field.name for field in Payout._meta.fields]
+
+    @admin.display(description='Seller')
+    def seller(self, obj):
+        return obj.wallet.user.email
+
+    @admin.display(description='Destination')
+    def masked_destination(self, obj):
+        return f'{obj.destination_phone[:5]}***{obj.destination_phone[-3:]}'
 
     def has_add_permission(self, request):
         return False

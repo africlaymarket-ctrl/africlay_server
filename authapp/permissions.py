@@ -1,6 +1,6 @@
 from rest_framework.permissions import BasePermission
 
-from .models import UserRole
+from .models import StaffRole
 
 
 class IsAuthenticated(BasePermission):
@@ -47,7 +47,7 @@ class IsBuyer(BasePermission):
 
 
 class IsAdminRole(BasePermission):
-    """Allows access only to admins or super admins."""
+    """Compatibility permission for super-admin-only administration."""
 
     def has_permission(self, request, view):
         return bool(
@@ -59,14 +59,38 @@ class IsAdminRole(BasePermission):
 
 
 class IsKYCReviewer(BasePermission):
-    """Allows only explicitly assigned application admin roles to review KYC."""
+    """Allows sales reviewers and super administrators to review KYC."""
 
     def has_permission(self, request, view):
         return bool(
             request.user
             and request.user.is_authenticated
             and request.user.is_active
-            and request.user.role in [UserRole.ADMIN, UserRole.SUPER_ADMIN]
+            and request.user.has_staff_role(StaffRole.SALES_REVIEWER)
+        )
+
+
+class IsSalesReviewer(IsKYCReviewer):
+    pass
+
+
+class IsFinance(BasePermission):
+    def has_permission(self, request, view):
+        return bool(
+            request.user
+            and request.user.is_authenticated
+            and request.user.is_active
+            and request.user.has_staff_role(StaffRole.FINANCE)
+        )
+
+
+class IsSuperAdmin(BasePermission):
+    def has_permission(self, request, view):
+        return bool(
+            request.user
+            and request.user.is_authenticated
+            and request.user.is_active
+            and request.user.is_super_admin
         )
 
 

@@ -55,3 +55,23 @@ Run the core endpoint workflow against the configured database with:
 This creates uniquely named smoke records through the store, KYC, product,
 and service endpoints so the results can be inspected in the persistent
 database. Use a development database for this command.
+
+## Seller payouts
+
+Seller earnings are held until delivery is confirmed, then become available in
+the seller wallet. Withdrawal requests reserve the selected amount before an
+asynchronous M-Pesa B2C request is sent. A successful provider result debits the
+reserved amount; a failed result releases it. Unknown results remain reserved
+for super-administrator reconciliation so the same funds cannot be paid twice.
+
+Configure these additional secrets on Render before enabling withdrawals:
+
+- `MPESA_B2C_INITIATOR_NAME`: production API operator username
+- `MPESA_B2C_SECURITY_CREDENTIAL`: operator password encrypted with the
+  production M-Pesa certificate
+- `MPESA_B2C_SHORTCODE`: shortcode backed by the B2C Utility account
+- `MPESA_B2C_COMMAND_ID`: normally `BusinessPayment`
+- `SELLER_MIN_PAYOUT`: whole-KES minimum, default `500.00`
+
+The collection passkey is not a B2C credential. Keep the B2C operator password
+and encrypted security credential out of source control and frontend variables.

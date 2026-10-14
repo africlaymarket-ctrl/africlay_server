@@ -8,11 +8,12 @@ from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from django.db import IntegrityError, transaction
 
-from authapp.models import UserRole
+from authapp.models import AdminAuditLog, StaffRole
 from authapp.permissions import IsKYCReviewer, IsSeller, IsVerifiedUser
 
 from .models import Store, StoreKYC, StoreKYCStatus, StoreStatus
 from .serializers import StoreKYCReviewSerializer, StoreKYCSerializer, StoreSerializer
+from .operations import StoreKYCQueueSerializer
 
 
 class StoreListCreateView(generics.ListCreateAPIView):
@@ -52,7 +53,7 @@ class StoreDetailView(generics.RetrieveUpdateAPIView):
         return [IsSeller(), IsVerifiedUser(), permissions.IsAuthenticated()]
 
     def perform_update(self, serializer):
-        is_explicit_admin = self.request.user.role in [UserRole.ADMIN, UserRole.SUPER_ADMIN]
+        is_explicit_admin = self.request.user.is_super_admin
         if serializer.instance.owner_id != self.request.user.id and not is_explicit_admin:
             raise PermissionDenied('You do not own this store.')
         serializer.save()
@@ -62,13 +63,13 @@ class StoreKYCDetailView(generics.RetrieveAPIView):
     serializer_class = StoreKYCSerializer
 
     def get_permissions(self):
-        if getattr(self.request.user, 'role', None) in [UserRole.ADMIN, UserRole.SUPER_ADMIN]:
+        if self.request.user.is_authenticated and self.request.user.has_staff_role(StaffRole.SALES_REVIEWER):
             return [IsKYCReviewer()]
         return [IsSeller(), IsVerifiedUser()]
 
     def get_queryset(self):
         queryset = StoreKYC.objects.select_related('store', 'reviewed_by')
-        if self.request.user.role in [UserRole.ADMIN, UserRole.SUPER_ADMIN]:
+        if self.request.user.has_staff_role(StaffRole.SALES_REVIEWER):
             return queryset
         return queryset.filter(store__owner=self.request.user)
 
@@ -154,5 +155,13 @@ class StoreKYCReviewView(generics.GenericAPIView):
             kyc.reviewed_at = timezone.now()
             kyc.rejection_reason = serializer.validated_data.get('rejection_reason', '') if decision == StoreKYCStatus.REJECTED else ''
             kyc.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'rejection_reason', 'updated_at'])
+            AdminAuditLog.objects.create(
+                actor=request.user,
+                action=f'kyc_{decision}',
+                target_type='store_kyc',
+                target_id=str(kyc.pk),
+                reason=kyc.rejection_reason,
+                metadata={'store_id': str(kyc.store_id), 'store_name': kyc.store.name},
+            )
 
-        return Response(StoreKYCSerializer(kyc).data)
+        return Response(StoreKYCQueueSerializer(kyc, context={'request': request}).data)

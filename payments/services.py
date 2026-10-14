@@ -15,8 +15,8 @@ from shopping.models import (
 )
 
 from .models import (
-    LedgerEntry, LedgerEntryType, Payment, PaymentPurpose, PaymentStatus, Wallet,
-    WalletTransaction, WalletTransactionType,
+    LedgerEntry, LedgerEntryType, Payment, PaymentPurpose, PaymentStatus, Payout,
+    PayoutStatus, Wallet, WalletTransaction, WalletTransactionType,
 )
 
 
@@ -130,6 +130,108 @@ def release_escrow_hold(wallet, amount, reference):
 
 def capture_escrow_hold(wallet, amount, reference):
     return _apply_operation(wallet, amount, reference, WalletTransactionType.ESCROW_CAPTURE)
+
+
+def capture_withdrawal_hold(wallet, amount, reference):
+    if not reference or len(reference) > 128:
+        raise WalletOperationError('A reference of 1 to 128 characters is required.')
+    amount = _validated_amount(amount)
+
+    try:
+        with transaction.atomic():
+            locked_wallet = Wallet.objects.select_for_update().get(pk=wallet.pk)
+            existing = WalletTransaction.objects.filter(reference=reference).first()
+            if existing:
+                if (
+                    existing.wallet_id == locked_wallet.pk
+                    and existing.transaction_type == WalletTransactionType.WITHDRAWAL
+                    and existing.amount == amount
+                ):
+                    return existing
+                raise WalletOperationError('Reference was already used for a different wallet operation.')
+
+            if locked_wallet.held_balance < amount:
+                raise WalletOperationError('Insufficient reserved wallet balance.')
+
+            locked_wallet.held_balance -= amount
+            locked_wallet.balance -= amount
+            locked_wallet.save(update_fields=['balance', 'held_balance', 'updated_at'])
+            return WalletTransaction.objects.create(
+                wallet=locked_wallet,
+                transaction_type=WalletTransactionType.WITHDRAWAL,
+                amount=amount,
+                balance_after=locked_wallet.balance,
+                held_balance_after=locked_wallet.held_balance,
+                reference=reference,
+            )
+    except IntegrityError:
+        existing = WalletTransaction.objects.filter(reference=reference).first()
+        if (
+            existing
+            and existing.wallet_id == wallet.pk
+            and existing.transaction_type == WalletTransactionType.WITHDRAWAL
+            and existing.amount == amount
+        ):
+            return existing
+        raise WalletOperationError('Reference was already used for a different wallet operation.') from None
+
+
+@transaction.atomic
+def resolve_payout(
+    payout,
+    *,
+    succeeded,
+    provider_result=None,
+    transaction_receipt='',
+    failure_code='',
+    failure_message='',
+    resolved_by=None,
+    resolution_note='',
+):
+    locked = Payout.objects.select_for_update().select_related('wallet').get(pk=payout.pk)
+    target_status = PayoutStatus.SUCCEEDED if succeeded else PayoutStatus.FAILED
+    if locked.status in {PayoutStatus.SUCCEEDED, PayoutStatus.FAILED}:
+        if locked.status == target_status:
+            return locked
+        raise WalletOperationError('This payout already has a different final status.')
+    if locked.status not in {
+        PayoutStatus.REQUESTED,
+        PayoutStatus.PROCESSING,
+        PayoutStatus.UNKNOWN,
+    }:
+        raise WalletOperationError('This payout cannot be resolved from its current status.')
+
+    if succeeded:
+        receipt = str(transaction_receipt).strip()
+        if not receipt:
+            raise WalletOperationError('A provider receipt is required to complete a payout.')
+        capture_withdrawal_hold(
+            locked.wallet,
+            locked.amount,
+            f'payout:{locked.pk}:withdrawal',
+        )
+        locked.transaction_receipt = receipt[:64]
+        locked.failure_code = ''
+        locked.failure_message = ''
+    else:
+        release_escrow_hold(
+            locked.wallet,
+            locked.amount,
+            f'payout:{locked.pk}:release',
+        )
+        locked.failure_code = str(failure_code)[:40]
+        locked.failure_message = str(failure_message or 'Payout was not completed.')[:255]
+
+    locked.status = target_status
+    locked.provider_result = provider_result or {}
+    locked.processed_at = timezone.now()
+    locked.resolved_by = resolved_by
+    locked.resolution_note = str(resolution_note)[:500]
+    locked.save(update_fields=[
+        'status', 'transaction_receipt', 'provider_result', 'failure_code',
+        'failure_message', 'processed_at', 'resolved_by', 'resolution_note', 'updated_at',
+    ])
+    return locked
 
 
 def transfer_escrow_to_wallet(source_wallet, destination_wallet, amount, reference):

@@ -217,3 +217,84 @@ class MpesaGateway:
                 'M-Pesa returned an invalid payment response.',
                 stage='stk_push',
             ) from error
+
+
+class MpesaB2CGateway:
+    def __init__(self):
+        self.base_url = getattr(settings, 'MPESA_BASE_URL', '').rstrip('/') or _configuration()
+        self.initiator_name = getattr(settings, 'MPESA_B2C_INITIATOR_NAME', '').strip()
+        self.security_credential = getattr(settings, 'MPESA_B2C_SECURITY_CREDENTIAL', '').strip()
+        self.shortcode = getattr(settings, 'MPESA_B2C_SHORTCODE', '').strip()
+        self.command_id = getattr(settings, 'MPESA_B2C_COMMAND_ID', 'BusinessPayment').strip()
+        self.callback_base_url = getattr(settings, 'MPESA_CALLBACK_BASE_URL', '').rstrip('/')
+        self.timeout = getattr(settings, 'MPESA_REQUEST_TIMEOUT', 15)
+        default_path = (
+            '/mpesa/b2c/v1/paymentrequest'
+            if settings.MPESA_ENVIRONMENT == 'production'
+            else '/mpesa/b2c/v3/paymentrequest'
+        )
+        self.endpoint_path = getattr(settings, 'MPESA_B2C_PATH', default_path).strip()
+
+    def _validate(self):
+        if not all([
+            settings.MPESA_CONSUMER_KEY,
+            settings.MPESA_CONSUMER_SECRET,
+            self.initiator_name,
+            self.security_credential,
+            self.shortcode,
+            self.callback_base_url,
+        ]):
+            raise MpesaConfigurationError('Seller payouts are not configured.')
+        if not self.callback_base_url.startswith('https://'):
+            raise MpesaConfigurationError('The payout callback URL must use HTTPS.')
+        if self.command_id not in {'BusinessPayment', 'SalaryPayment', 'PromotionPayment'}:
+            raise MpesaConfigurationError('MPESA_B2C_COMMAND_ID is invalid.')
+        if not self.endpoint_path.startswith('/'):
+            raise MpesaConfigurationError('MPESA_B2C_PATH must begin with a slash.')
+
+    def initiate_payout(self, *, payout, callback_token):
+        self._validate()
+        token = _access_token(self.base_url)
+        result_url = (
+            f'{self.callback_base_url}/api/payments/payouts/provider-result/{callback_token}/'
+        )
+        timeout_url = (
+            f'{self.callback_base_url}/api/payments/payouts/provider-timeout/{callback_token}/'
+        )
+        payload = {
+            'OriginatorConversationID': payout.originator_conversation_id,
+            'InitiatorName': self.initiator_name,
+            'SecurityCredential': self.security_credential,
+            'CommandID': self.command_id,
+            'Amount': int(payout.amount),
+            'PartyA': self.shortcode,
+            'PartyB': payout.destination_phone,
+            'Remarks': f'AfriClay seller payout {str(payout.pk)[:8]}',
+            'QueueTimeOutURL': timeout_url,
+            'ResultURL': result_url,
+            'Occassion': 'Seller payout',
+        }
+        try:
+            response = requests.post(
+                f'{self.base_url}{self.endpoint_path}',
+                headers={'Authorization': f'Bearer {token}'},
+                json=payload,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except requests.Timeout:
+            raise
+        except requests.RequestException as error:
+            raise _gateway_error('M-Pesa rejected the payout request.', 'b2c_payout', error) from error
+        except (ValueError, TypeError) as error:
+            raise MpesaGatewayError(
+                'M-Pesa returned an invalid payout response.',
+                stage='b2c_payout',
+            ) from error
+        if not isinstance(data, dict):
+            raise MpesaGatewayError(
+                'M-Pesa returned an invalid payout response.',
+                stage='b2c_payout',
+            )
+        return data

@@ -69,6 +69,102 @@ class WalletTransaction(TimestampedModel):
         return f'{self.transaction_type} {self.amount} {self.wallet.currency}'
 
 
+class PayoutProvider(models.TextChoices):
+    MPESA = 'mpesa', 'M-Pesa'
+
+
+class PayoutStatus(models.TextChoices):
+    REQUESTED = 'requested', 'Requested'
+    PROCESSING = 'processing', 'Processing'
+    SUCCEEDED = 'succeeded', 'Succeeded'
+    FAILED = 'failed', 'Failed'
+    UNKNOWN = 'unknown', 'Needs Reconciliation'
+
+
+class PayoutAccount(TimestampedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='payout_account',
+    )
+    provider = models.CharField(
+        max_length=20,
+        choices=PayoutProvider.choices,
+        default=PayoutProvider.MPESA,
+    )
+    phone_number = models.CharField(max_length=12)
+    account_name = models.CharField(max_length=255, blank=True, default='')
+    is_active = models.BooleanField(default=True)
+    confirmed_at = models.DateTimeField()
+
+    class Meta:
+        ordering = ['user__email']
+
+    def __str__(self):
+        return f'{self.user.email} payout account'
+
+
+class Payout(TimestampedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    wallet = models.ForeignKey(Wallet, on_delete=models.PROTECT, related_name='payouts')
+    payout_account = models.ForeignKey(PayoutAccount, on_delete=models.PROTECT, related_name='payouts')
+    provider = models.CharField(
+        max_length=20,
+        choices=PayoutProvider.choices,
+        default=PayoutProvider.MPESA,
+    )
+    amount = models.DecimalField(max_digits=14, decimal_places=2, validators=[MinValueValidator(1)])
+    currency = models.CharField(max_length=3, validators=[currency_code_validator], default='KES')
+    status = models.CharField(
+        max_length=16,
+        choices=PayoutStatus.choices,
+        default=PayoutStatus.REQUESTED,
+    )
+    destination_phone = models.CharField(max_length=12)
+    destination_name = models.CharField(max_length=255, blank=True, default='')
+    idempotency_key = models.CharField(max_length=100)
+    callback_token_hash = models.CharField(max_length=64, unique=True)
+    originator_conversation_id = models.CharField(max_length=64, unique=True)
+    conversation_id = models.CharField(max_length=100, blank=True, default='')
+    transaction_receipt = models.CharField(max_length=64, blank=True, default='')
+    provider_response = models.JSONField(default=dict, blank=True)
+    provider_result = models.JSONField(default=dict, blank=True)
+    failure_code = models.CharField(max_length=40, blank=True, default='')
+    failure_message = models.CharField(max_length=255, blank=True, default='')
+    processed_at = models.DateTimeField(null=True, blank=True)
+    resolved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='resolved_payouts',
+    )
+    resolution_note = models.CharField(max_length=500, blank=True, default='')
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['wallet', 'idempotency_key'],
+                name='unique_wallet_payout_idempotency_key',
+            ),
+            models.UniqueConstraint(
+                fields=['provider', 'transaction_receipt'],
+                condition=Q(transaction_receipt__gt=''),
+                name='unique_payout_provider_receipt',
+            ),
+            models.CheckConstraint(condition=Q(amount__gte=1), name='payout_amount_minimum'),
+        ]
+        indexes = [
+            models.Index(fields=['status', 'created_at'], name='payments_po_status_42b194_idx'),
+            models.Index(fields=['wallet', 'created_at'], name='payments_po_wallet_04a128_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.amount} {self.currency} payout to {self.destination_phone}'
+
+
 class PaymentAttemptStatus(models.TextChoices):
     INITIATED = 'initiated', 'Initiated'
     PENDING = 'pending', 'Pending'

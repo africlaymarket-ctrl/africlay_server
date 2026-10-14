@@ -20,6 +20,7 @@ def generate_access_token(user):
         'user_id': str(user.id),
         'email': user.email,
         'role': user.role,
+        'auth_version': user.auth_version,
         'token_type': 'access',
         'jti': str(uuid.uuid4()),
         'exp': timezone.now() + timezone.timedelta(days=1),
@@ -34,6 +35,7 @@ def generate_refresh_token(user):
         'user_id': str(user.id),
         'email': user.email,
         'token_type': 'refresh',
+        'auth_version': user.auth_version,
         'jti': str(uuid.uuid4()),
         'exp': timezone.now() + timezone.timedelta(days=7),
         'iat': timezone.now(),
@@ -107,6 +109,9 @@ def refresh_access_token(refresh_token):
 
     if not user.is_active:
         raise AuthenticationFailed('User account is inactive.')
+
+    if payload.get('auth_version', 0) != user.auth_version:
+        raise AuthenticationFailed('Session permissions have changed. Please log in again.')
 
     # Blacklist used refresh token for rotation security
     if jti:

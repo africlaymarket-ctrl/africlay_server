@@ -1,6 +1,9 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
-from .models import User, UserProfile, UserAddress, OTPVerification, BlacklistedToken
+from .models import (
+    AdminAuditLog, BlacklistedToken, DashboardAccessRequest, OTPVerification,
+    User, UserAddress, UserProfile, UserStaffRole,
+)
 
 
 class UserProfileInline(admin.StackedInline):
@@ -64,3 +67,24 @@ class BlacklistedTokenAdmin(admin.ModelAdmin):
     list_display = ('user', 'token_id', 'blacklisted_at', 'expires_at')
     search_fields = ('user__email', 'token_id')
     readonly_fields = ('blacklisted_at',)
+
+
+admin.site.register(UserStaffRole)
+admin.site.register(DashboardAccessRequest)
+
+
+@admin.register(AdminAuditLog)
+class AdminAuditLogAdmin(admin.ModelAdmin):
+    list_display = ('action', 'target_type', 'target_id', 'actor', 'created_at')
+    list_filter = ('action', 'target_type')
+    search_fields = ('target_id', 'actor__email', 'reason')
+    readonly_fields = [field.name for field in AdminAuditLog._meta.fields]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

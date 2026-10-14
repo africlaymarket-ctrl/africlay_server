@@ -80,3 +80,13 @@ services:
         sync: false
       - key: MPESA_PUBLIC_CERT
         sync: false
+      - key: MPESA_B2C_INITIATOR_NAME
+        sync: false
+      - key: MPESA_B2C_SECURITY_CREDENTIAL
+        sync: false
+      - key: MPESA_B2C_SHORTCODE
+        sync: false
+      - key: MPESA_B2C_COMMAND_ID
+        value: BusinessPayment
+      - key: SELLER_MIN_PAYOUT
+        value: "500.00"

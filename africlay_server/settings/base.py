@@ -253,3 +253,16 @@ MPESA_BASE_URL = os.getenv(
 )
 MPESA_SHORT_CODE = os.getenv('MPESA_SHORT_CODE', MPESA_SHORTCODE)
 MPESA_CALLBACK_URL = os.getenv('MPESA_CALLBACK_URL', f'{MPESA_CALLBACK_BASE_URL}/api/payments/mpesa/callback/')
+
+# B2C seller disbursements use separate M-Pesa operator credentials. The
+# security credential must already be encrypted with the certificate for the
+# configured environment before it is stored as a deployment secret.
+MPESA_B2C_INITIATOR_NAME = os.getenv('MPESA_B2C_INITIATOR_NAME', '')
+MPESA_B2C_SECURITY_CREDENTIAL = os.getenv('MPESA_B2C_SECURITY_CREDENTIAL', '')
+MPESA_B2C_SHORTCODE = os.getenv('MPESA_B2C_SHORTCODE', '')
+MPESA_B2C_COMMAND_ID = os.getenv('MPESA_B2C_COMMAND_ID', 'BusinessPayment')
+MPESA_B2C_PATH = os.getenv(
+    'MPESA_B2C_PATH',
+    '/mpesa/b2c/v1/paymentrequest' if MPESA_ENVIRONMENT == 'production' else '/mpesa/b2c/v3/paymentrequest',
+)
+SELLER_MIN_PAYOUT = os.getenv('SELLER_MIN_PAYOUT', '500.00')

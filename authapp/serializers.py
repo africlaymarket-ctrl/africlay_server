@@ -71,6 +71,7 @@ class UserAddressSerializer(serializers.ModelSerializer):
 class UserSummarySerializer(serializers.ModelSerializer):
     profile = UserProfileSerializer(read_only=True)
     full_name = serializers.CharField(read_only=True)
+    staff_roles = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -79,6 +80,7 @@ class UserSummarySerializer(serializers.ModelSerializer):
             'email',
             'phone_number',
             'role',
+            'staff_roles',
             'is_verified',
             'is_active',
             'full_name',
@@ -86,6 +88,9 @@ class UserSummarySerializer(serializers.ModelSerializer):
             'date_joined',
         ]
         read_only_fields = ['id', 'email', 'is_verified', 'is_active', 'date_joined']
+
+    def get_staff_roles(self, user):
+        return list(user.staff_role_assignments.order_by('role').values_list('role', flat=True))
 
 
 class UserRegistrationSerializer(serializers.Serializer):
