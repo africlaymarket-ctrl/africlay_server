@@ -1,11 +1,16 @@
 from django.db import transaction
-from django.db.models import Q
+from datetime import timedelta
+
+from django.db.models import Count, Q
 from rest_framework import generics, serializers, status
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.pagination import LimitOffsetPagination
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from django.utils.dateparse import parse_date
+from django.utils import timezone
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema
 
 from authapp.models import AdminAuditLog
 from authapp.permissions import IsAuthenticated, IsSalesReviewer, IsSuperAdmin
@@ -59,7 +64,69 @@ class StoreKYCReviewQueueView(generics.ListAPIView):
         submitted_to = parse_date(self.request.query_params.get('submitted_to', '').strip())
         if submitted_to:
             queryset = queryset.filter(submitted_at__date__lte=submitted_to)
+        if review_status == StoreKYCStatus.PENDING:
+            return queryset.order_by('submitted_at')
         return queryset.order_by('-submitted_at')
+
+
+class StoreKYCSummaryView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated, IsSalesReviewer]
+
+    @extend_schema(responses=OpenApiTypes.OBJECT)
+    def get(self, request, *args, **kwargs):
+        queryset = StoreKYC.objects.select_related('store', 'store__owner', 'reviewed_by')
+        submitted_from = parse_date(request.query_params.get('submitted_from', '').strip())
+        submitted_to = parse_date(request.query_params.get('submitted_to', '').strip())
+        filtered = queryset
+        if submitted_from:
+            filtered = filtered.filter(submitted_at__date__gte=submitted_from)
+        if submitted_to:
+            filtered = filtered.filter(submitted_at__date__lte=submitted_to)
+
+        counts = filtered.aggregate(
+            total=Count('id'),
+            pending=Count('id', filter=Q(status=StoreKYCStatus.PENDING)),
+            approved=Count('id', filter=Q(status=StoreKYCStatus.APPROVED)),
+            rejected=Count('id', filter=Q(status=StoreKYCStatus.REJECTED)),
+        )
+        now = timezone.now()
+        pending = queryset.filter(status=StoreKYCStatus.PENDING)
+        aging = pending.aggregate(
+            under_3_days=Count('id', filter=Q(submitted_at__gt=now - timedelta(days=3))),
+            days_3_to_7=Count('id', filter=Q(
+                submitted_at__lte=now - timedelta(days=3),
+                submitted_at__gt=now - timedelta(days=8),
+            )),
+            over_7_days=Count('id', filter=Q(submitted_at__lte=now - timedelta(days=8))),
+        )
+        workload = list(
+            filtered.exclude(reviewed_by=None).filter(
+                status__in=[StoreKYCStatus.APPROVED, StoreKYCStatus.REJECTED],
+            ).values('reviewed_by__email').annotate(
+                reviewed=Count('id'),
+                approved=Count('id', filter=Q(status=StoreKYCStatus.APPROVED)),
+                rejected=Count('id', filter=Q(status=StoreKYCStatus.REJECTED)),
+            ).order_by('-reviewed', 'reviewed_by__email')
+        )
+        recent = filtered.exclude(reviewed_at=None).order_by('-reviewed_at')[:8]
+        return Response({
+            'counts': counts,
+            'pending_aging': aging,
+            'reviewer_workload': [
+                {
+                    'reviewer_email': row['reviewed_by__email'],
+                    'reviewed': row['reviewed'],
+                    'approved': row['approved'],
+                    'rejected': row['rejected'],
+                }
+                for row in workload
+            ],
+            'recent_activity': StoreKYCQueueSerializer(
+                recent,
+                many=True,
+                context={'request': request},
+            ).data,
+        })
 
 
 class AdminStoreSerializer(serializers.ModelSerializer):

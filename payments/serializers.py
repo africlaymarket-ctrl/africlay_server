@@ -138,6 +138,20 @@ class PaymentSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class AdminPaymentSerializer(PaymentSerializer):
+    buyer_email = serializers.EmailField(source='order.buyer.email', read_only=True)
+    phone_number = serializers.SerializerMethodField()
+
+    class Meta(PaymentSerializer.Meta):
+        fields = PaymentSerializer.Meta.fields + [
+            'buyer_email', 'phone_number', 'failure_code', 'failure_message',
+            'created_at', 'updated_at', 'completed_at',
+        ]
+
+    def get_phone_number(self, payment) -> str:
+        return masked_phone(payment.phone_number)
+
+
 class FinanceTransactionSerializer(serializers.ModelSerializer):
     order_id = serializers.UUIDField(read_only=True)
     payment_id = serializers.UUIDField(read_only=True, allow_null=True)

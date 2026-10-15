@@ -3,6 +3,7 @@ import csv
 import logging
 import secrets
 import uuid
+from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
@@ -38,6 +39,7 @@ from .models import (
     WalletTransaction,
 )
 from .serializers import (
+    AdminPaymentSerializer,
     AdminPayoutSerializer,
     FinanceTransactionSerializer,
     MpesaStkPushSerializer,
@@ -420,35 +422,101 @@ class AdminPayoutListView(generics.ListAPIView):
         return queryset
 
 
+class AdminPaymentListView(generics.ListAPIView):
+    serializer_class = AdminPaymentSerializer
+    permission_classes = [IsAuthenticated, IsFinance]
+    pagination_class = WalletTransactionPagination
+
+    def get_queryset(self):
+        queryset = Payment.objects.select_related('order', 'order__buyer')
+        payment_status = self.request.query_params.get('status', '').strip()
+        if payment_status in PaymentStatus.values:
+            queryset = queryset.filter(status=payment_status)
+        search = self.request.query_params.get('search', '').strip()
+        if search:
+            query = (
+                Q(order__buyer__email__icontains=search)
+                | Q(receipt_number__icontains=search)
+                | Q(checkout_request_id__icontains=search)
+                | Q(failure_code__icontains=search)
+            )
+            try:
+                query |= Q(order_id=uuid.UUID(search))
+            except ValueError:
+                pass
+            queryset = queryset.filter(query)
+        date_from = parse_date(self.request.query_params.get('date_from', '').strip())
+        if date_from:
+            queryset = queryset.filter(created_at__date__gte=date_from)
+        date_to = parse_date(self.request.query_params.get('date_to', '').strip())
+        if date_to:
+            queryset = queryset.filter(created_at__date__lte=date_to)
+        return queryset.order_by('-created_at')
+
+
 class AdminFinanceSummaryView(generics.GenericAPIView):
     serializer_class = AdminPayoutSerializer
     permission_classes = [IsAuthenticated, IsFinance]
 
     @extend_schema(responses=OpenApiTypes.OBJECT)
     def get(self, request, *args, **kwargs):
+        date_from = parse_date(request.query_params.get('date_from', '').strip())
+        date_to = parse_date(request.query_params.get('date_to', '').strip())
+
+        def period(queryset):
+            if date_from:
+                queryset = queryset.filter(created_at__date__gte=date_from)
+            if date_to:
+                queryset = queryset.filter(created_at__date__lte=date_to)
+            return queryset
+
         wallet_totals = Wallet.objects.aggregate(
             liability=Sum('balance'),
             reserved=Sum('held_balance'),
         )
-        payout_totals = Payout.objects.aggregate(
+        payout_totals = period(Payout.objects.all()).aggregate(
             completed=Sum('amount', filter=Q(status=PayoutStatus.SUCCEEDED)),
+        )
+        active_payouts = Payout.objects.filter(status__in=[
+            PayoutStatus.REQUESTED, PayoutStatus.PROCESSING, PayoutStatus.UNKNOWN,
+        ])
+        pending_payouts = active_payouts.aggregate(
             pending=Sum('amount', filter=Q(status__in=[
                 PayoutStatus.REQUESTED, PayoutStatus.PROCESSING, PayoutStatus.UNKNOWN,
             ])),
         )
-        ledger_totals = LedgerEntry.objects.aggregate(
+        ledger_totals = period(LedgerEntry.objects.all()).aggregate(
             commission=Sum('amount', filter=Q(entry_type=LedgerEntryType.COMMISSION_EARNED)),
             seller_released=Sum('amount', filter=Q(entry_type=LedgerEntryType.SELLER_PROCEEDS_RELEASE)),
+            customer_payments=Sum('amount', filter=Q(entry_type__in=[
+                LedgerEntryType.CUSTOMER_PAYMENT, LedgerEntryType.DELIVERY_FEE,
+            ])),
         )
+        payments = period(Payment.objects.all())
+        reconciliation = Payout.objects.filter(status=PayoutStatus.UNKNOWN).order_by('created_at')
+        oldest_reconciliation = reconciliation.values_list('created_at', flat=True).first()
         zero = Decimal('0.00')
         return Response({
             'wallet_liability': wallet_totals['liability'] or zero,
             'wallet_reserved': wallet_totals['reserved'] or zero,
             'commission_earned': ledger_totals['commission'] or zero,
             'seller_proceeds_released': ledger_totals['seller_released'] or zero,
-            'payouts_pending': payout_totals['pending'] or zero,
+            'customer_payments': ledger_totals['customer_payments'] or zero,
+            'payouts_pending': pending_payouts['pending'] or zero,
             'payouts_completed': payout_totals['completed'] or zero,
-            'needs_reconciliation': Payout.objects.filter(status=PayoutStatus.UNKNOWN).count(),
+            'needs_reconciliation': reconciliation.count(),
+            'reconciliation_over_24h': reconciliation.filter(
+                created_at__lte=timezone.now() - timedelta(hours=24),
+            ).count(),
+            'oldest_reconciliation_at': oldest_reconciliation,
+            'failed_payments': payments.filter(status=PaymentStatus.FAILED).count(),
+            'pending_payments': payments.filter(status__in=[
+                PaymentStatus.INITIATED, PaymentStatus.PENDING,
+            ]).count(),
+            'period': {
+                'date_from': date_from.isoformat() if date_from else None,
+                'date_to': date_to.isoformat() if date_to else None,
+            },
         })
 
 

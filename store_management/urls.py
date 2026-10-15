@@ -12,6 +12,7 @@ from .operations import (
     AdminStoreListView,
     AdminStoreStatusView,
     StoreKYCReviewQueueView,
+    StoreKYCSummaryView,
 )
 
 
@@ -20,6 +21,7 @@ app_name = 'store_management'
 urlpatterns = [
     path('', StoreListCreateView.as_view(), name='store-list-create'),
     path('kyc/review-queue/', StoreKYCReviewQueueView.as_view(), name='store-kyc-review-queue'),
+    path('kyc/review-summary/', StoreKYCSummaryView.as_view(), name='store-kyc-review-summary'),
     path('admin/', AdminStoreListView.as_view(), name='admin-store-list'),
     path('admin/<uuid:pk>/', AdminStoreDetailView.as_view(), name='admin-store-detail'),
     path('admin/<uuid:pk>/status/', AdminStoreStatusView.as_view(), name='admin-store-status'),

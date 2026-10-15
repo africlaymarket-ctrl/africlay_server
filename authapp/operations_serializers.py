@@ -1,6 +1,9 @@
 from rest_framework import serializers
 
 from .models import AdminAuditLog, DashboardAccessRequest, StaffRole, User
+from product_management.models import Product
+from service_management.models import Service
+from shopping.models import Order
 
 
 class OperationsUserSerializer(serializers.ModelSerializer):
@@ -40,6 +43,13 @@ class StaffRoleChangeSerializer(serializers.Serializer):
         if not value:
             raise serializers.ValidationError('A reason is required.')
         return value
+
+
+class StaffRoleEmailAssignmentSerializer(StaffRoleChangeSerializer):
+    email = serializers.EmailField(max_length=255)
+
+    def validate_email(self, value):
+        return value.strip().lower()
 
 
 class AccountStatusChangeSerializer(serializers.Serializer):
@@ -105,3 +115,71 @@ class DashboardAccessReviewSerializer(serializers.Serializer):
         if not value:
             raise serializers.ValidationError('A review reason is required.')
         return value
+
+
+class AdminProductSerializer(serializers.ModelSerializer):
+    store_name = serializers.CharField(source='store.name', read_only=True)
+    owner_email = serializers.EmailField(source='store.owner.email', read_only=True)
+    category_name = serializers.CharField(source='category.name', read_only=True, allow_null=True)
+
+    class Meta:
+        model = Product
+        fields = [
+            'id', 'name', 'slug', 'sku', 'status', 'price', 'currency',
+            'stock_quantity', 'store', 'store_name', 'owner_email', 'category',
+            'category_name', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class AdminServiceSerializer(serializers.ModelSerializer):
+    store_name = serializers.CharField(source='store.name', read_only=True)
+    owner_email = serializers.EmailField(source='store.owner.email', read_only=True)
+    category_name = serializers.CharField(source='category.name', read_only=True, allow_null=True)
+
+    class Meta:
+        model = Service
+        fields = [
+            'id', 'name', 'slug', 'status', 'price', 'currency',
+            'duration_minutes', 'store', 'store_name', 'owner_email', 'category',
+            'category_name', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class CatalogStatusChangeSerializer(serializers.Serializer):
+    action = serializers.ChoiceField(choices=['archive', 'restore_to_draft'])
+    reason = serializers.CharField(max_length=1000)
+    confirm = serializers.BooleanField()
+
+    def validate_reason(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError('A moderation reason is required.')
+        return value
+
+    def validate_confirm(self, value):
+        if value is not True:
+            raise serializers.ValidationError('Explicit confirmation is required.')
+        return value
+
+
+class AdminOrderSerializer(serializers.ModelSerializer):
+    buyer_email = serializers.EmailField(source='buyer.email', read_only=True)
+    item_count = serializers.IntegerField(read_only=True)
+    seller_emails = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Order
+        fields = [
+            'id', 'buyer', 'buyer_email', 'item_count', 'seller_emails',
+            'total_amount', 'item_subtotal', 'shipping_cost', 'currency',
+            'status', 'payment_method', 'payment_status', 'payment_option',
+            'amount_paid', 'delivery_fee_paid', 'shipping_city',
+            'shipping_country', 'courier_name', 'tracking_number',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_seller_emails(self, order):
+        return sorted({item.seller.email for item in order.items.all() if item.seller_id})

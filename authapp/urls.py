@@ -15,8 +15,13 @@ from .views import (
 )
 from .operations_views import (
     AdminAuditLogListView,
+    AdminCatalogListView,
+    AdminCatalogStatusView,
+    AdminOperationsSummaryView,
+    AdminOrderListView,
     AdminUserDetailView,
     AdminUserListView,
+    AdminStaffRoleByEmailView,
     AdminUserStaffRoleView,
     AdminUserStatusView,
     AdminDashboardAccessRequestListView,
@@ -27,7 +32,12 @@ from .operations_views import (
 app_name = 'authapp'
 
 urlpatterns = [
+    path('admin/overview/', AdminOperationsSummaryView.as_view(), name='admin-operations-summary'),
+    path('admin/catalog/<str:kind>/', AdminCatalogListView.as_view(), name='admin-catalog-list'),
+    path('admin/catalog/<str:kind>/<uuid:pk>/status/', AdminCatalogStatusView.as_view(), name='admin-catalog-status'),
+    path('admin/orders/', AdminOrderListView.as_view(), name='admin-order-list'),
     path('admin/users/', AdminUserListView.as_view(), name='admin-user-list'),
+    path('admin/staff-assignments/', AdminStaffRoleByEmailView.as_view(), name='admin-staff-role-by-email'),
     path('admin/users/<uuid:pk>/', AdminUserDetailView.as_view(), name='admin-user-detail'),
     path('admin/users/<uuid:pk>/staff-roles/', AdminUserStaffRoleView.as_view(), name='admin-user-staff-role'),
     path('admin/users/<uuid:pk>/status/', AdminUserStatusView.as_view(), name='admin-user-status'),

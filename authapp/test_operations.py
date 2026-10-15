@@ -16,7 +16,9 @@ from authapp.models import (
     UserStaffRole,
 )
 from authapp.utils import generate_access_token
-from payments.models import LedgerEntry, LedgerEntryType
+from payments.models import LedgerEntry, LedgerEntryType, Payment, PaymentStatus
+from product_management.models import Product, ProductStatus
+from service_management.models import Service, ServiceStatus
 from shopping.models import Order
 from store_management.models import Store, StoreKYC, StoreKYCStatus, StoreStatus
 
@@ -40,6 +42,23 @@ class OperationsPermissionTests(APITestCase):
             email='seller@example.com', password='StrongPassword123!', role=UserRole.SELLER, is_verified=True,
         )
         self.store = Store.objects.create(owner=self.seller, name='Seller Studio', slug='seller-studio', city='Nairobi')
+        self.product = Product.objects.create(
+            store=self.store,
+            name='Test product',
+            slug='test-product',
+            sku='TEST-001',
+            price=Decimal('100.00'),
+            stock_quantity=5,
+            status=ProductStatus.PUBLISHED,
+        )
+        self.service = Service.objects.create(
+            store=self.store,
+            name='Test service',
+            slug='test-service',
+            price=Decimal('250.00'),
+            duration_minutes=60,
+            status=ServiceStatus.PUBLISHED,
+        )
         self.kyc = StoreKYC.objects.create(
             store=self.store,
             business_name='Seller Studio Ltd',
@@ -131,6 +150,51 @@ class OperationsPermissionTests(APITestCase):
         )
         self.assertEqual(escalation.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_super_admin_can_assign_and_revoke_dashboard_access_by_exact_email(self):
+        self.authenticate(self.super_admin)
+        url = reverse('authapp:admin-staff-role-by-email')
+        granted = self.client.post(
+            url,
+            {
+                'email': self.regular.email.upper(),
+                'role': StaffRole.FINANCE,
+                'action': 'grant',
+                'reason': 'Finance contract approved.',
+            },
+            format='json',
+        )
+        self.assertEqual(granted.status_code, status.HTTP_200_OK, granted.data)
+        self.assertIn(StaffRole.FINANCE, granted.data['staff_roles'])
+        self.assertTrue(AdminAuditLog.objects.filter(
+            action='staff_role_granted',
+            target_id=str(self.regular.pk),
+            metadata__assignment_method='email',
+        ).exists())
+
+        revoked = self.client.post(
+            url,
+            {
+                'email': self.regular.email,
+                'role': StaffRole.FINANCE,
+                'action': 'revoke',
+                'reason': 'Finance assignment ended.',
+            },
+            format='json',
+        )
+        self.assertEqual(revoked.status_code, status.HTTP_200_OK, revoked.data)
+        self.assertNotIn(StaffRole.FINANCE, revoked.data['staff_roles'])
+
+        self.authenticate(self.finance)
+        self.assertEqual(
+            self.client.post(url, {
+                'email': self.regular.email,
+                'role': StaffRole.FINANCE,
+                'action': 'grant',
+                'reason': 'Not permitted.',
+            }, format='json').status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
     def test_account_and_store_status_changes_require_reason_and_confirmation(self):
         self.authenticate(self.super_admin)
         account_url = reverse('authapp:admin-user-status', kwargs={'pk': self.regular.pk})
@@ -176,3 +240,104 @@ class OperationsPermissionTests(APITestCase):
             format='json',
         )
         self.assertEqual(repeated.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_super_admin_has_overview_catalog_moderation_and_order_oversight(self):
+        for user in [self.sales, self.finance, self.regular, self.legacy_admin]:
+            self.authenticate(user)
+            self.assertEqual(
+                self.client.get(reverse('authapp:admin-operations-summary')).status_code,
+                status.HTTP_403_FORBIDDEN,
+            )
+            self.assertEqual(
+                self.client.get(reverse('authapp:admin-catalog-list', kwargs={'kind': 'products'})).status_code,
+                status.HTTP_403_FORBIDDEN,
+            )
+            self.assertEqual(
+                self.client.get(reverse('authapp:admin-order-list')).status_code,
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        self.authenticate(self.super_admin)
+        overview = self.client.get(reverse('authapp:admin-operations-summary'))
+        self.assertEqual(overview.status_code, status.HTTP_200_OK, overview.data)
+        self.assertEqual(overview.data['products']['published'], 1)
+        self.assertEqual(overview.data['services']['published'], 1)
+        self.assertEqual(overview.data['orders']['total'], 1)
+        self.assertEqual(overview.data['trend_days'], 30)
+        self.assertEqual(len(overview.data['trends']), 30)
+
+        products = self.client.get(reverse('authapp:admin-catalog-list', kwargs={'kind': 'products'}))
+        self.assertEqual(products.status_code, status.HTTP_200_OK, products.data)
+        self.assertEqual(products.data['results'][0]['owner_email'], self.seller.email)
+        services = self.client.get(reverse('authapp:admin-catalog-list', kwargs={'kind': 'services'}))
+        self.assertEqual(services.status_code, status.HTTP_200_OK, services.data)
+
+        moderation_url = reverse(
+            'authapp:admin-catalog-status',
+            kwargs={'kind': 'products', 'pk': self.product.pk},
+        )
+        missing_confirmation = self.client.post(
+            moderation_url,
+            {'action': 'archive', 'reason': 'Policy review.', 'confirm': False},
+            format='json',
+        )
+        self.assertEqual(missing_confirmation.status_code, status.HTTP_400_BAD_REQUEST)
+        archived = self.client.post(
+            moderation_url,
+            {'action': 'archive', 'reason': 'Policy review.', 'confirm': True},
+            format='json',
+        )
+        self.assertEqual(archived.status_code, status.HTTP_200_OK, archived.data)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.status, ProductStatus.ARCHIVED)
+        self.assertTrue(AdminAuditLog.objects.filter(
+            action='product_archived', target_id=str(self.product.pk), actor=self.super_admin,
+        ).exists())
+
+        restored = self.client.post(
+            moderation_url,
+            {'action': 'restore_to_draft', 'reason': 'Seller may revise the listing.', 'confirm': True},
+            format='json',
+        )
+        self.assertEqual(restored.status_code, status.HTTP_200_OK, restored.data)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.status, ProductStatus.DRAFT)
+
+        orders = self.client.get(reverse('authapp:admin-order-list'))
+        self.assertEqual(orders.status_code, status.HTTP_200_OK, orders.data)
+        self.assertEqual(orders.data['results'][0]['buyer_email'], self.regular.email)
+        self.assertEqual(orders.data['results'][0]['item_count'], 0)
+
+    def test_role_dashboards_receive_real_queue_and_exception_summaries(self):
+        self.authenticate(self.sales)
+        kyc_summary = self.client.get(reverse('store_management:store-kyc-review-summary'))
+        self.assertEqual(kyc_summary.status_code, status.HTTP_200_OK, kyc_summary.data)
+        self.assertEqual(kyc_summary.data['counts']['pending'], 1)
+        self.assertEqual(
+            sum(kyc_summary.data['pending_aging'].values()),
+            1,
+        )
+
+        self.authenticate(self.finance)
+        Payment.objects.create(
+            order=self.order,
+            status=PaymentStatus.FAILED,
+            amount=Decimal('100.00'),
+            phone_number='254700000000',
+            failure_code='provider_rejected',
+            failure_message='Payment was declined.',
+        )
+        finance_summary = self.client.get(reverse('payments:admin-finance-summary'))
+        self.assertEqual(finance_summary.status_code, status.HTTP_200_OK, finance_summary.data)
+        self.assertIn('failed_payments', finance_summary.data)
+        self.assertIn('reconciliation_over_24h', finance_summary.data)
+        self.assertIn('customer_payments', finance_summary.data)
+        payment_queue = self.client.get(reverse('payments:admin-payment-list'), {'status': 'failed'})
+        self.assertEqual(payment_queue.status_code, status.HTTP_200_OK, payment_queue.data)
+        self.assertEqual(payment_queue.data['results'][0]['failure_code'], 'provider_rejected')
+
+        self.authenticate(self.sales)
+        self.assertEqual(
+            self.client.get(reverse('payments:admin-payment-list')).status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
