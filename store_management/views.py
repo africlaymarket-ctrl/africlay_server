@@ -10,6 +10,7 @@ from django.db import IntegrityError, transaction
 
 from authapp.models import AdminAuditLog, StaffRole
 from authapp.permissions import IsKYCReviewer, IsSeller, IsVerifiedUser
+from core.pagination import CatalogPagination
 
 from .models import Store, StoreKYC, StoreKYCStatus, StoreStatus
 from .serializers import StoreKYCReviewSerializer, StoreKYCSerializer, StoreSerializer
@@ -18,6 +19,7 @@ from .operations import StoreKYCQueueSerializer
 
 class StoreListCreateView(generics.ListCreateAPIView):
     serializer_class = StoreSerializer
+    pagination_class = CatalogPagination
 
     def get_permissions(self):
         if self.request.method == 'POST':

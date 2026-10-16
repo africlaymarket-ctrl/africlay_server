@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -324,6 +325,9 @@ class SellerPayoutApiTests(TestCase):
 
 
 class MpesaB2CGatewayTests(TestCase):
+    def setUp(self):
+        cache.clear()
+
     @override_settings(
         MPESA_ENVIRONMENT='sandbox',
         MPESA_BASE_URL='https://sandbox.safaricom.co.ke',
@@ -365,6 +369,9 @@ class MpesaB2CGatewayTests(TestCase):
 
 
 class MpesaGatewayTests(TestCase):
+    def setUp(self):
+        cache.clear()
+
     @override_settings(
         MPESA_BASE_URL='https://sandbox.safaricom.co.ke',
         MPESA_CONSUMER_KEY='consumer-key',
@@ -404,6 +411,37 @@ class MpesaGatewayTests(TestCase):
             'https://api.africlaymarket.com/api/payments/provider-callback/payment-token/',
         )
         self.assertEqual(post.call_args.kwargs['json']['Timestamp'], '20261011131530')
+
+    @override_settings(
+        MPESA_ENVIRONMENT='sandbox',
+        MPESA_BASE_URL='https://sandbox.safaricom.co.ke',
+        MPESA_CONSUMER_KEY='consumer-key',
+        MPESA_CONSUMER_SECRET='consumer-secret',
+        MPESA_SHORTCODE='174379',
+        MPESA_PASSKEY='passkey',
+        MPESA_CALLBACK_BASE_URL='https://api.africlaymarket.com',
+        MPESA_REQUEST_TIMEOUT=10,
+    )
+    @patch('payments.gateways.mpesa.requests.post')
+    @patch('payments.gateways.mpesa.requests.get')
+    def test_initiate_payment_reuses_unexpired_access_token(self, get, post):
+        get.return_value.json.return_value = {'access_token': 'generated-token', 'expires_in': '3599'}
+        post.return_value.json.return_value = {
+            'MerchantRequestID': 'merchant-id',
+            'CheckoutRequestID': 'checkout-id',
+        }
+        gateway = MpesaGateway()
+
+        for reference in ('order-one', 'order-two'):
+            gateway.initiate_payment(
+                phone_number='254712345678',
+                amount=Decimal('100.00'),
+                account_reference=reference,
+                callback_token=f'{reference}-token',
+            )
+
+        self.assertEqual(get.call_count, 1)
+        self.assertEqual(post.call_count, 2)
 
 
 class WalletApiTests(TestCase):

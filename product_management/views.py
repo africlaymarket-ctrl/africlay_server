@@ -2,15 +2,18 @@ from rest_framework import generics, permissions, status
 from rest_framework.exceptions import MethodNotAllowed, PermissionDenied, ValidationError
 from rest_framework.response import Response
 from django.db import IntegrityError, transaction
+from django.db.models import Prefetch
 from django.shortcuts import get_object_or_404
+from uuid import UUID
 
 from authapp.permissions import IsAdminRole, IsSeller, IsVerifiedUser
 from core.services import require_approved_kyc_for_publication
+from core.pagination import CatalogPagination
 from store_management.models import Store, StoreKYCStatus, StoreStatus
 
 from .models import Category, Product, ProductImage, ProductStatus, Tag
 from .serializers import (
-    CategorySerializer, ProductImageSerializer, ProductSerializer,
+    CategorySerializer, ProductCatalogSerializer, ProductImageSerializer, ProductSerializer,
     SellerCategoryPathSerializer, TagSerializer,
 )
 
@@ -66,22 +69,38 @@ class TagDetailView(generics.RetrieveUpdateAPIView):
 
 
 class ProductListView(generics.ListAPIView):
-    serializer_class = ProductSerializer
+    serializer_class = ProductCatalogSerializer
     permission_classes = [permissions.AllowAny]
+    pagination_class = CatalogPagination
 
     def get_queryset(self):
         queryset = Product.objects.filter(
             status=ProductStatus.PUBLISHED,
             store__status=StoreStatus.ACTIVE,
             store__kyc__status=StoreKYCStatus.APPROVED,
-        ).select_related('store', 'category').prefetch_related('tags', 'images')
+        ).select_related('store', 'category').prefetch_related(
+            'tags',
+            Prefetch(
+                'images',
+                queryset=ProductImage.objects.order_by(
+                    '-is_primary', 'display_order', 'created_at',
+                )[:1],
+                to_attr='catalog_images',
+            ),
+        )
 
         category_slug = self.request.query_params.get('category')
         tag_slug = self.request.query_params.get('tag')
+        store_key = self.request.query_params.get('store')
         if category_slug:
             queryset = queryset.filter(category__slug=category_slug)
         if tag_slug:
             queryset = queryset.filter(tags__slug=tag_slug)
+        if store_key:
+            try:
+                queryset = queryset.filter(store_id=UUID(store_key))
+            except ValueError:
+                queryset = queryset.filter(store__slug=store_key)
         return queryset.distinct()
 
 

@@ -2,6 +2,8 @@ from django.core.files.uploadedfile import UploadedFile
 from django.db.models.fields.files import FieldFile
 from rest_framework import serializers
 
+from core.images import optimized_webp
+from core.serializer_fields import MarketplaceImageField
 from shopping.shipping import canonical_shipping_town
 
 from .models import Store, StoreKYC, StoreKYCDocumentType, StoreKYCStatus
@@ -9,6 +11,8 @@ from .models import Store, StoreKYC, StoreKYCDocumentType, StoreKYCStatus
 
 class StoreSerializer(serializers.ModelSerializer):
     owner = serializers.UUIDField(source='owner_id', read_only=True)
+    logo = MarketplaceImageField(required=False, allow_null=True)
+    banner = MarketplaceImageField(required=False, allow_null=True)
 
     class Meta:
         model = Store
@@ -50,6 +54,32 @@ class StoreSerializer(serializers.ModelSerializer):
         if self.instance is None and not attrs.get('city'):
             raise serializers.ValidationError({'city': 'Choose a dispatch town for delivery pricing.'})
         return attrs
+
+    def _save_optimized_media(self, instance, uploads):
+        sizes = {'logo': (640, 80), 'banner': (1600, 82)}
+        changed = []
+        for field_name, upload in uploads.items():
+            if upload is None:
+                setattr(instance, field_name, None)
+                changed.append(field_name)
+                continue
+            dimension, quality = sizes[field_name]
+            optimized = optimized_webp(upload, max_dimension=dimension, quality=quality)
+            getattr(instance, field_name).save(optimized.name, optimized, save=False)
+            changed.append(field_name)
+        if changed:
+            instance.save(update_fields=[*changed, 'updated_at'])
+        return instance
+
+    def create(self, validated_data):
+        uploads = {key: validated_data.pop(key) for key in ('logo', 'banner') if key in validated_data}
+        instance = super().create(validated_data)
+        return self._save_optimized_media(instance, uploads)
+
+    def update(self, instance, validated_data):
+        uploads = {key: validated_data.pop(key) for key in ('logo', 'banner') if key in validated_data}
+        instance = super().update(instance, validated_data)
+        return self._save_optimized_media(instance, uploads)
 
 
 class StoreKYCSerializer(serializers.ModelSerializer):

@@ -4,7 +4,11 @@ from decimal import Decimal
 from django.core.validators import MinValueValidator
 from django.db import models
 
-from core.models import TimestampedModel, service_image_upload_path, validate_image_upload
+from core.models import (
+    TimestampedModel, service_image_upload_path, service_thumbnail_upload_path,
+    validate_image_upload,
+)
+from core.storage import public_media_storage
 from product_management.models import Tag
 
 
@@ -58,7 +62,19 @@ class Service(TimestampedModel):
 class ServiceImage(TimestampedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     service = models.ForeignKey(Service, on_delete=models.CASCADE, related_name='images')
-    image = models.ImageField(upload_to=service_image_upload_path, validators=[validate_image_upload])
+    image = models.ImageField(
+        upload_to=service_image_upload_path,
+        storage=public_media_storage,
+        max_length=300,
+        validators=[validate_image_upload],
+    )
+    thumbnail = models.ImageField(
+        upload_to=service_thumbnail_upload_path,
+        storage=public_media_storage,
+        max_length=300,
+        blank=True,
+        null=True,
+    )
     alt_text = models.CharField(max_length=255, blank=True, default='')
     is_primary = models.BooleanField(default=False)
     display_order = models.PositiveIntegerField(default=0)

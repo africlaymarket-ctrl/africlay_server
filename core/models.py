@@ -21,11 +21,11 @@ def avatar_upload_path(instance, filename):
 
 
 def store_logo_upload_path(instance, filename):
-    return f'stores/{instance.pk or "pending"}/logos/{_upload_name(filename)}'
+    return f'public/stores/{instance.pk or "pending"}/logos/{_upload_name(filename)}'
 
 
 def store_banner_upload_path(instance, filename):
-    return f'stores/{instance.pk or "pending"}/banners/{_upload_name(filename)}'
+    return f'public/stores/{instance.pk or "pending"}/banners/{_upload_name(filename)}'
 
 
 def kyc_document_upload_path(instance, filename):
@@ -33,11 +33,19 @@ def kyc_document_upload_path(instance, filename):
 
 
 def product_image_upload_path(instance, filename):
-    return f'products/{instance.product.store_id}/{instance.product_id}/{_upload_name(filename)}'
+    return f'public/products/{instance.product.store_id}/{instance.product_id}/detail/{_upload_name(filename)}'
+
+
+def product_thumbnail_upload_path(instance, filename):
+    return f'public/products/{instance.product.store_id}/{instance.product_id}/thumb/{_upload_name(filename)}'
 
 
 def service_image_upload_path(instance, filename):
-    return f'services/{instance.service.store_id}/{instance.service_id}/{_upload_name(filename)}'
+    return f'public/services/{instance.service.store_id}/{instance.service_id}/detail/{_upload_name(filename)}'
+
+
+def service_thumbnail_upload_path(instance, filename):
+    return f'public/services/{instance.service.store_id}/{instance.service_id}/thumb/{_upload_name(filename)}'
 
 
 MAX_IMAGE_UPLOAD_SIZE = 5 * 1024 * 1024

@@ -1,5 +1,8 @@
 import base64
+import hashlib
 import json
+import logging
+from time import perf_counter
 from zoneinfo import ZoneInfo
 
 import requests
@@ -7,11 +10,15 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from django.conf import settings
+from django.core.cache import cache
 from django.utils import timezone
 
 
 class MpesaConfigurationError(Exception):
     pass
+
+
+logger = logging.getLogger('africlay.performance')
 
 
 class MpesaGatewayError(Exception):
@@ -68,19 +75,45 @@ def _configuration():
     return host
 
 
-def _access_token(host):
+def _access_token(host, *, timeout=None):
+    timeout = timeout or settings.MPESA_REQUEST_TIMEOUT
+    identity = hashlib.sha256(
+        f'{settings.MPESA_ENVIRONMENT}:{settings.MPESA_CONSUMER_KEY}'.encode(),
+    ).hexdigest()[:16]
+    cache_key = f'mpesa:oauth:{identity}'
+    cached = cache.get(cache_key)
+    if cached:
+        logger.info('mpesa stage=oauth cache=hit duration_ms=0.0')
+        return cached
+
+    started = perf_counter()
+    credentials = base64.b64encode(
+        f'{settings.MPESA_CONSUMER_KEY}:{settings.MPESA_CONSUMER_SECRET}'.encode(),
+    ).decode()
     try:
         response = requests.get(
             f'{host}/oauth/v1/generate?grant_type=client_credentials',
-            auth=(settings.MPESA_CONSUMER_KEY, settings.MPESA_CONSUMER_SECRET),
-            timeout=10,
+            headers={'Authorization': f'Basic {credentials}'},
+            timeout=timeout,
         )
         response.raise_for_status()
-        token = response.json().get('access_token')
-    except (requests.RequestException, ValueError) as error:
-        raise MpesaGatewayError('Unable to authenticate with the M-Pesa service.') from error
+        payload = response.json()
+        token = payload.get('access_token')
+        expires_in = int(payload.get('expires_in', 3599))
+    except requests.RequestException as error:
+        raise _gateway_error('Unable to authenticate with M-Pesa.', 'authentication', error) from error
+    except (TypeError, ValueError) as error:
+        raise MpesaGatewayError(
+            'M-Pesa returned an invalid authentication response.',
+            stage='authentication',
+        ) from error
     if not token:
-        raise MpesaGatewayError('M-Pesa did not return an access token.')
+        raise MpesaGatewayError('M-Pesa did not return an access token.', stage='authentication')
+    cache.set(cache_key, token, timeout=max(60, expires_in - 60))
+    logger.info(
+        'mpesa stage=oauth cache=miss duration_ms=%.1f',
+        (perf_counter() - started) * 1000,
+    )
     return token
 
 
@@ -138,6 +171,7 @@ def initiate_stk_push(attempt, callback_token):
         'TransactionDesc': 'Wallet top up',
     }
     try:
+        started = perf_counter()
         response = requests.post(
             f'{host}/mpesa/stkpush/v1/processrequest',
             json=payload,
@@ -145,6 +179,7 @@ def initiate_stk_push(attempt, callback_token):
             timeout=15,
         )
         response.raise_for_status()
+        logger.info('mpesa stage=stk_push duration_ms=%.1f', (perf_counter() - started) * 1000)
         return response.json()
     except (requests.RequestException, ValueError) as error:
         raise MpesaGatewayError('M-Pesa request outcome is unknown.') from error
@@ -163,24 +198,10 @@ class MpesaGateway:
         self.timeout = getattr(settings, 'MPESA_REQUEST_TIMEOUT', 15)
 
     def initiate_payment(self, *, phone_number, amount, account_reference, callback_token):
-        credentials = base64.b64encode(f'{self.consumer_key}:{self.consumer_secret}'.encode()).decode()
         try:
-            token_response = requests.get(
-                f'{self.base_url}/oauth/v1/generate?grant_type=client_credentials',
-                headers={'Authorization': f'Basic {credentials}'},
-                timeout=self.timeout,
-            )
-            token_response.raise_for_status()
-            access_token = token_response.json()['access_token']
+            access_token = _access_token(self.base_url, timeout=self.timeout)
         except requests.Timeout:
             raise
-        except requests.RequestException as error:
-            raise _gateway_error('Unable to authenticate with M-Pesa.', 'authentication', error) from error
-        except (KeyError, ValueError, TypeError) as error:
-            raise MpesaGatewayError(
-                'M-Pesa returned an invalid authentication response.',
-                stage='authentication',
-            ) from error
 
         timestamp = timezone.localtime(timezone.now(), ZoneInfo('Africa/Nairobi')).strftime('%Y%m%d%H%M%S')
         password = base64.b64encode(f'{self.short_code}{self.passkey}{timestamp}'.encode()).decode()
@@ -188,6 +209,7 @@ class MpesaGateway:
             f'{self.callback_base_url}/api/payments/provider-callback/{callback_token}/'
         )
         try:
+            started = perf_counter()
             response = requests.post(
                 f'{self.base_url}/mpesa/stkpush/v1/processrequest',
                 headers={'Authorization': f'Bearer {access_token}'},
@@ -207,6 +229,7 @@ class MpesaGateway:
                 timeout=self.timeout,
             )
             response.raise_for_status()
+            logger.info('mpesa stage=stk_push duration_ms=%.1f', (perf_counter() - started) * 1000)
             return response.json()
         except requests.Timeout:
             raise

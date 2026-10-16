@@ -1,13 +1,15 @@
 import logging
 import mimetypes
+from time import perf_counter
 from urllib.parse import quote
 
 import requests
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.core.files.base import ContentFile
-from django.core.files.storage import Storage
+from django.core.files.storage import Storage, storages
 from django.utils.deconstruct import deconstructible
+from storages.backends.s3 import S3Storage
 
 
 logger = logging.getLogger(__name__)
@@ -118,6 +120,7 @@ class SupabaseStorage(Storage):
             response.close()
 
     def url(self, name):
+        started = perf_counter()
         response = requests.post(
             self._object_url('object/sign', name),
             headers=self._headers(**{'Content-Type': 'application/json'}),
@@ -128,6 +131,10 @@ class SupabaseStorage(Storage):
             logger.warning('Supabase Storage object is missing: %s', name)
             return ''
         response.raise_for_status()
+        logger.info(
+            'private_media_signed_url duration_ms=%.1f',
+            (perf_counter() - started) * 1000,
+        )
         signed_url = response.json().get('signedURL') or response.json().get('signedUrl')
         if not signed_url:
             raise ValueError('Supabase Storage did not return a signed URL.')
@@ -138,3 +145,59 @@ class SupabaseStorage(Storage):
         if not signed_url.startswith('/storage/v1/'):
             signed_url = f'/storage/v1{signed_url}'
         return f'{self.base_url}{signed_url}'
+
+
+@deconstructible
+class SupabasePublicStorage(SupabaseStorage):
+    """Public Supabase REST storage with stable, cacheable asset URLs."""
+
+    def __init__(self, bucket_name=None, base_url=None, secret_key=None, timeout=None):
+        super().__init__(
+            bucket_name=bucket_name or settings.SUPABASE_PUBLIC_MEDIA_BUCKET,
+            base_url=base_url,
+            secret_key=secret_key,
+            timeout=timeout,
+        )
+
+    def _save(self, name, content):
+        content_type = getattr(content, 'content_type', None)
+        if not content_type:
+            content_type = mimetypes.guess_type(name)[0] or 'application/octet-stream'
+        payload = b''.join(content.chunks())
+        response = requests.post(
+            self._object_url('object', name),
+            headers=self._headers(**{
+                'Content-Type': content_type,
+                'Cache-Control': settings.PUBLIC_MEDIA_CACHE_CONTROL,
+                'x-upsert': 'false',
+            }),
+            data=payload,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return name
+
+    def _open(self, name, mode='rb'):
+        if mode not in {'r', 'rb'}:
+            raise ValueError('SupabasePublicStorage only supports read mode when opening files.')
+        response = requests.get(self.url(name), timeout=self.timeout)
+        response.raise_for_status()
+        return ContentFile(response.content, name=name)
+
+    def url(self, name):
+        return self._object_url('object/public', name)
+
+
+class SupabasePublicS3Storage(S3Storage):
+    """S3-compatible upload backend that serves through Supabase's public CDN URL."""
+
+    def url(self, name, parameters=None, expire=None, http_method=None):
+        encoded_name = quote(name.lstrip('/'), safe='/')
+        base_url = settings.SUPABASE_URL.rstrip('/')
+        bucket = quote(self.bucket_name, safe='')
+        return f'{base_url}/storage/v1/object/public/{bucket}/{encoded_name}'
+
+
+def public_media_storage():
+    """Resolve lazily so tests and local development can override STORAGES."""
+    return storages['public_media']

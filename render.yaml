@@ -7,7 +7,7 @@ services:
     buildCommand: |
       pip install uv
       uv sync --no-install-project
-    startCommand: python manage.py migrate --noinput && gunicorn africlay_server.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    startCommand: python manage.py migrate --noinput && python manage.py migrate_public_media --delete-source --ignore-errors && gunicorn africlay_server.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --timeout 120
     healthCheckPath: /api/schema/
     envVars:
       - key: PYTHON_VERSION
@@ -30,6 +30,10 @@ services:
         value: "true"
       - key: SUPABASE_STORAGE_BUCKET
         sync: false
+      - key: SUPABASE_PUBLIC_MEDIA_BUCKET
+        value: africlay-public-media
+      - key: PUBLIC_MEDIA_CACHE_CONTROL
+        value: public, max-age=31536000, immutable
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SECRET_KEY
@@ -44,6 +48,8 @@ services:
         sync: false
       - key: SUPABASE_SIGNED_URL_TTL
         value: "3600"
+      - key: REDIS_URL
+        sync: false
       - key: DB_ENGINE
         value: django.db.backends.postgresql
       - key: DB_NAME

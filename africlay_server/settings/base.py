@@ -62,6 +62,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'core.middleware.RequestTimingMiddleware',
 ]
 
 ROOT_URLCONF = 'africlay_server.urls'
@@ -99,6 +100,7 @@ CORS_ALLOWED_ORIGINS = [
     if origin.strip()
 ]
 CORS_ALLOW_CREDENTIALS = True
+CORS_EXPOSE_HEADERS = ['Server-Timing']
 CSRF_TRUSTED_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
@@ -172,9 +174,16 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
+STORAGES = {
+    'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+    'public_media': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+    'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+}
+
 # Supabase Storage S3 credentials are server-side only. A private bucket keeps
 # KYC documents protected; Django returns temporary signed URLs for media.
 SUPABASE_STORAGE_BUCKET = os.getenv('SUPABASE_STORAGE_BUCKET', '').strip()
+SUPABASE_PUBLIC_MEDIA_BUCKET = os.getenv('SUPABASE_PUBLIC_MEDIA_BUCKET', 'africlay-public-media').strip()
 SUPABASE_URL = os.getenv('SUPABASE_URL', '').strip().rstrip('/')
 SUPABASE_SECRET_KEY = os.getenv('SUPABASE_SECRET_KEY', '').strip()
 SUPABASE_STORAGE_TIMEOUT = float(os.getenv('SUPABASE_STORAGE_TIMEOUT', '20'))
@@ -182,6 +191,10 @@ SUPABASE_S3_ENDPOINT_URL = os.getenv('SUPABASE_S3_ENDPOINT_URL', '').strip().rst
 SUPABASE_S3_REGION = os.getenv('SUPABASE_S3_REGION', '').strip()
 SUPABASE_S3_ACCESS_KEY_ID = os.getenv('SUPABASE_S3_ACCESS_KEY_ID', '').strip()
 SUPABASE_S3_SECRET_ACCESS_KEY = os.getenv('SUPABASE_S3_SECRET_ACCESS_KEY', '').strip()
+PUBLIC_MEDIA_CACHE_CONTROL = os.getenv(
+    'PUBLIC_MEDIA_CACHE_CONTROL',
+    'public, max-age=31536000, immutable',
+).strip()
 
 if SUPABASE_STORAGE_BUCKET:
     _supabase_s3_values = (
@@ -193,6 +206,22 @@ if SUPABASE_STORAGE_BUCKET:
     if all(_supabase_s3_values):
         STORAGES = {
             'default': {'BACKEND': 'storages.backends.s3.S3Storage'},
+            'public_media': {
+                'BACKEND': 'core.storage.SupabasePublicS3Storage',
+                'OPTIONS': {
+                    'bucket_name': SUPABASE_PUBLIC_MEDIA_BUCKET,
+                    'endpoint_url': SUPABASE_S3_ENDPOINT_URL,
+                    'region_name': SUPABASE_S3_REGION,
+                    'access_key': SUPABASE_S3_ACCESS_KEY_ID,
+                    'secret_key': SUPABASE_S3_SECRET_ACCESS_KEY,
+                    'addressing_style': 'path',
+                    'signature_version': 's3v4',
+                    'default_acl': None,
+                    'querystring_auth': False,
+                    'file_overwrite': False,
+                    'object_parameters': {'CacheControl': PUBLIC_MEDIA_CACHE_CONTROL},
+                },
+            },
             'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
         }
         AWS_STORAGE_BUCKET_NAME = SUPABASE_STORAGE_BUCKET
@@ -209,6 +238,7 @@ if SUPABASE_STORAGE_BUCKET:
     elif SUPABASE_URL and SUPABASE_SECRET_KEY:
         STORAGES = {
             'default': {'BACKEND': 'core.storage.SupabaseStorage'},
+            'public_media': {'BACKEND': 'core.storage.SupabasePublicStorage'},
             'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
         }
     elif any(_supabase_s3_values):
@@ -222,6 +252,23 @@ if SUPABASE_STORAGE_BUCKET:
         )
 
 SUPABASE_SIGNED_URL_TTL = int(os.getenv('SUPABASE_SIGNED_URL_TTL', '3600'))
+
+REDIS_URL = os.getenv('REDIS_URL', '').strip()
+if REDIS_URL:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django_redis.cache.RedisCache',
+            'LOCATION': REDIS_URL,
+            'OPTIONS': {'CLIENT_CLASS': 'django_redis.client.DefaultClient'},
+        }
+    }
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'africlay-runtime-cache',
+        }
+    }
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

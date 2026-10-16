@@ -6,6 +6,7 @@ from core.models import (
 	TimestampedModel, kyc_document_upload_path, store_banner_upload_path,
 	store_logo_upload_path, validate_document_upload, validate_image_upload,
 )
+from core.storage import public_media_storage
 
 
 class StoreStatus(models.TextChoices):
@@ -43,8 +44,22 @@ class Store(TimestampedModel):
 	city = models.CharField(max_length=100, blank=True, default='')
 	country = models.CharField(max_length=100, blank=True, default='')
 	country_code = models.CharField(max_length=2, blank=True, default='')
-	logo = models.ImageField(upload_to=store_logo_upload_path, blank=True, null=True, validators=[validate_image_upload])
-	banner = models.ImageField(upload_to=store_banner_upload_path, blank=True, null=True, validators=[validate_image_upload])
+	logo = models.ImageField(
+		upload_to=store_logo_upload_path,
+		storage=public_media_storage,
+		max_length=300,
+		blank=True,
+		null=True,
+		validators=[validate_image_upload],
+	)
+	banner = models.ImageField(
+		upload_to=store_banner_upload_path,
+		storage=public_media_storage,
+		max_length=300,
+		blank=True,
+		null=True,
+		validators=[validate_image_upload],
+	)
 	average_rating = models.DecimalField(max_digits=3, decimal_places=2, default=0)
 	total_reviews = models.PositiveIntegerField(default=0)
 	total_orders = models.PositiveIntegerField(default=0)

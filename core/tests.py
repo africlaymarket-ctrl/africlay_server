@@ -7,7 +7,7 @@ from django.conf import settings
 from django.core.files.base import ContentFile
 from django.test import SimpleTestCase
 
-from .storage import SupabaseStorage
+from .storage import SupabasePublicStorage, SupabaseStorage
 
 
 class StorageSettingsTests(SimpleTestCase):
@@ -145,3 +145,29 @@ class SupabaseStorageTests(SimpleTestCase):
 
         self.assertFalse(self.storage.exists('products/missing.jpg'))
         response.close.assert_called_once()
+
+
+class SupabasePublicStorageTests(SimpleTestCase):
+    def setUp(self):
+        self.storage = SupabasePublicStorage(
+            bucket_name='africlay-public-media',
+            base_url='https://project.supabase.co',
+            secret_key='test-secret',
+            timeout=5,
+        )
+
+    def test_url_is_stable_public_cdn_url(self):
+        self.assertEqual(
+            self.storage.url('public/products/example image.webp'),
+            'https://project.supabase.co/storage/v1/object/public/'
+            'africlay-public-media/public/products/example%20image.webp',
+        )
+
+    @patch('core.storage.requests.post')
+    def test_save_sets_long_lived_cache_control(self, post):
+        post.return_value = Mock()
+
+        self.storage._save('public/products/example.webp', ContentFile(b'image-data'))
+
+        headers = post.call_args.kwargs['headers']
+        self.assertEqual(headers['Cache-Control'], settings.PUBLIC_MEDIA_CACHE_CONTROL)

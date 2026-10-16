@@ -69,7 +69,7 @@ class ServiceApiTests(TestCase):
         self.authenticate_as(self.seller)
         self.client.post(reverse('service_management:service-manage-list'), self.service_data, format='json')
         self.client.credentials()
-        self.assertEqual(self.client.get(reverse('service_management:service-list')).data, [])
+        self.assertEqual(self.client.get(reverse('service_management:service-list')).data['results'], [])
 
     def test_seller_cannot_publish_service_before_kyc_approval(self):
         self.authenticate_as(self.seller)
@@ -105,6 +105,8 @@ class ServiceApiTests(TestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertIn('services/', response.data['image'])
+        self.assertIn('/thumb/', response.data['thumbnail'])
+        self.assertTrue(response.data['image'].endswith('.webp'))
 
     def test_seller_can_delete_owned_service(self):
         self.authenticate_as(self.seller)

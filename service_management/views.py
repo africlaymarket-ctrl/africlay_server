@@ -1,14 +1,20 @@
 from django.db import IntegrityError, transaction
+from django.db.models import Prefetch
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, permissions
 from rest_framework.exceptions import PermissionDenied, ValidationError
+from uuid import UUID
 
 from authapp.permissions import IsAdminRole, IsAuthenticated, IsSeller, IsVerifiedUser
 from core.services import require_approved_kyc_for_publication
+from core.pagination import CatalogPagination
 from store_management.models import Store, StoreKYCStatus, StoreStatus
 
 from .models import Booking, BookingStatus, Service, ServiceCategory, ServiceImage, ServiceStatus
-from .serializers import BookingSerializer, BookingStatusUpdateSerializer, ServiceCategorySerializer, ServiceImageSerializer, ServiceSerializer
+from .serializers import (
+    BookingSerializer, BookingStatusUpdateSerializer, ServiceCatalogSerializer,
+    ServiceCategorySerializer, ServiceImageSerializer, ServiceSerializer,
+)
 
 
 class ServiceCategoryListCreateView(generics.ListCreateAPIView):
@@ -28,14 +34,31 @@ class ServiceCategoryDetailView(generics.RetrieveUpdateAPIView):
 
 
 class ServiceListView(generics.ListAPIView):
-    serializer_class = ServiceSerializer
+    serializer_class = ServiceCatalogSerializer
     permission_classes = [permissions.AllowAny]
+    pagination_class = CatalogPagination
 
     def get_queryset(self):
-        return Service.objects.filter(
+        queryset = Service.objects.filter(
             status=ServiceStatus.PUBLISHED, store__status=StoreStatus.ACTIVE,
             store__kyc__status=StoreKYCStatus.APPROVED,
-        ).select_related('store', 'category').prefetch_related('tags', 'images')
+        ).select_related('store', 'category').prefetch_related(
+            'tags',
+            Prefetch(
+                'images',
+                queryset=ServiceImage.objects.order_by(
+                    '-is_primary', 'display_order', 'created_at',
+                )[:1],
+                to_attr='catalog_images',
+            ),
+        )
+        store_key = self.request.query_params.get('store')
+        if store_key:
+            try:
+                queryset = queryset.filter(store_id=UUID(store_key))
+            except ValueError:
+                queryset = queryset.filter(store__slug=store_key)
+        return queryset
 
 
 class ServiceManageListCreateView(generics.ListCreateAPIView):

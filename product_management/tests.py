@@ -82,7 +82,7 @@ class ProductApiTests(TestCase):
 		response = self.client.get(reverse('product_management:product-list'))
 
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
-		self.assertEqual(response.data, [])
+		self.assertEqual(response.data['results'], [])
 		self.assertEqual(create_response.data['status'], 'draft')
 
 	def test_public_catalogue_returns_published_product(self):
@@ -98,8 +98,8 @@ class ProductApiTests(TestCase):
 		response = self.client.get(reverse('product_management:product-list'))
 
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
-		self.assertEqual(len(response.data), 1)
-		self.assertEqual(response.data[0]['slug'], create_response.data['slug'])
+		self.assertEqual(response.data['count'], 1)
+		self.assertEqual(response.data['results'][0]['slug'], create_response.data['slug'])
 
 	def test_public_catalogue_filters_by_category_and_tag_slug(self):
 		self.approve_store_kyc()
@@ -124,12 +124,12 @@ class ProductApiTests(TestCase):
 		response = self.client.get(reverse('product_management:product-list'), {'category': 'ceramics', 'tag': 'studio-made'})
 
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
-		self.assertEqual([item['slug'] for item in response.data], ['hand-thrown-mug'])
+		self.assertEqual([item['slug'] for item in response.data['results']], ['hand-thrown-mug'])
 
 	def test_public_catalogue_can_retrieve_product_by_slug(self):
 		self.approve_store_kyc()
 		self.authenticate_as(self.seller)
-		self.client.post(
+		second = self.client.post(
 			reverse('product_management:product-manage-list'),
 			{**self.product_data, 'status': 'published'},
 			format='json',
@@ -245,3 +245,52 @@ class ProductApiTests(TestCase):
 		)
 		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 		self.assertIn('products/', response.data['image'])
+		self.assertIn('/thumb/', response.data['thumbnail'])
+		self.assertTrue(response.data['image'].endswith('.webp'))
+
+	def test_public_catalogue_honours_limit_and_returns_only_cover_image(self):
+		self.approve_store_kyc()
+		self.authenticate_as(self.seller)
+		first = self.client.post(
+			reverse('product_management:product-manage-list'),
+			{**self.product_data, 'status': 'published'},
+			format='json',
+		)
+		second = self.client.post(
+			reverse('product_management:product-manage-list'),
+			{**self.product_data, 'name': 'Second mug', 'slug': 'second-mug', 'sku': 'MUG-002', 'status': 'published'},
+			format='json',
+		)
+		for index in range(2):
+			image = SimpleUploadedFile(
+				f'mug-{index}.gif',
+				b'GIF87a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02L\x01\x00;',
+				content_type='image/gif',
+			)
+			self.client.post(
+				reverse('product_management:product-image-list', kwargs={'pk': first.data['id']}),
+				{'image': image, 'is_primary': index == 0, 'display_order': index},
+				format='multipart',
+			)
+		second_image = SimpleUploadedFile(
+			'second.gif',
+			b'GIF87a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02L\x01\x00;',
+			content_type='image/gif',
+		)
+		self.client.post(
+			reverse('product_management:product-image-list', kwargs={'pk': second.data['id']}),
+			{'image': second_image, 'is_primary': True},
+			format='multipart',
+		)
+		self.client.credentials()
+
+		response = self.client.get(reverse('product_management:product-list'), {'limit': 1})
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(response.data['count'], 2)
+		self.assertEqual(len(response.data['results']), 1)
+		self.assertEqual(len(response.data['results'][0]['images']), 1)
+		self.assertIn('/thumb/', response.data['results'][0]['images'][0]['image'])
+		all_products = self.client.get(reverse('product_management:product-list'), {'limit': 2})
+		first_product = next(item for item in all_products.data['results'] if item['slug'] == 'hand-thrown-mug')
+		self.assertEqual(len(first_product['images']), 1)

@@ -4,6 +4,8 @@ from django.db import transaction
 from django.utils.text import slugify
 from rest_framework import serializers
 
+from core.images import marketplace_image_variants
+from core.serializer_fields import MarketplaceImageField, marketplace_media_url
 from .models import Category, Product, ProductImage, Tag
 
 
@@ -97,10 +99,44 @@ class TagSerializer(serializers.ModelSerializer):
 
 
 class ProductImageSerializer(serializers.ModelSerializer):
+    image = MarketplaceImageField()
+    thumbnail = MarketplaceImageField(read_only=True)
+
     class Meta:
         model = ProductImage
-        fields = ['id', 'product', 'image', 'alt_text', 'is_primary', 'display_order', 'created_at', 'updated_at']
+        fields = [
+            'id', 'product', 'image', 'thumbnail', 'alt_text', 'is_primary',
+            'display_order', 'created_at', 'updated_at',
+        ]
         read_only_fields = ['id', 'product', 'created_at', 'updated_at']
+
+    def create(self, validated_data):
+        upload = validated_data.pop('image')
+        detail, thumbnail = marketplace_image_variants(upload)
+        instance = ProductImage(**validated_data)
+        try:
+            instance.image.save(detail.name, detail, save=False)
+            instance.thumbnail.save(thumbnail.name, thumbnail, save=False)
+            instance.save()
+        except Exception:
+            if instance.image.name:
+                instance.image.storage.delete(instance.image.name)
+            if instance.thumbnail.name:
+                instance.thumbnail.storage.delete(instance.thumbnail.name)
+            raise
+        return instance
+
+
+class ProductCatalogImageSerializer(serializers.ModelSerializer):
+    image = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProductImage
+        fields = ['id', 'image', 'alt_text', 'is_primary', 'display_order']
+
+    def get_image(self, obj):
+        request = self.context.get('request')
+        return marketplace_media_url(obj.thumbnail or obj.image, request)
 
 
 class ProductSerializer(serializers.ModelSerializer):
@@ -145,3 +181,16 @@ class ProductSerializer(serializers.ModelSerializer):
                     field: 'Standard delivery only accepts packages with every side under 100 cm.',
                 })
         return attrs
+
+
+class ProductCatalogSerializer(ProductSerializer):
+    images = serializers.SerializerMethodField()
+
+    def get_images(self, obj):
+        images = getattr(obj, 'catalog_images', None)
+        if images is None:
+            images = obj.images.order_by('-is_primary', 'display_order', 'created_at')[:1]
+        image = next(iter(images), None)
+        if image is None:
+            return []
+        return ProductCatalogImageSerializer([image], many=True, context=self.context).data
