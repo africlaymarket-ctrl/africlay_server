@@ -1,12 +1,15 @@
 import os
 import subprocess
 import sys
+from io import BytesIO
 from unittest.mock import Mock, patch
 
 from django.conf import settings
 from django.core.files.base import ContentFile
 from django.test import SimpleTestCase
+from PIL import Image
 
+from .images import marketplace_image_variants
 from .storage import SupabasePublicStorage, SupabaseStorage
 
 
@@ -171,3 +174,18 @@ class SupabasePublicStorageTests(SimpleTestCase):
 
         headers = post.call_args.kwargs['headers']
         self.assertEqual(headers['Cache-Control'], settings.PUBLIC_MEDIA_CACHE_CONTROL)
+
+
+class MarketplaceImageTests(SimpleTestCase):
+    def test_existing_image_bytes_generate_both_webp_variants(self):
+        source = BytesIO()
+        Image.new('RGB', (1800, 900), color='green').save(source, format='JPEG')
+
+        detail, thumbnail = marketplace_image_variants(source.getvalue())
+
+        self.assertTrue(detail.name.endswith('-detail.webp'))
+        self.assertTrue(thumbnail.name.endswith('-thumb.webp'))
+        with Image.open(detail) as detail_image:
+            self.assertLessEqual(max(detail_image.size), 1600)
+        with Image.open(thumbnail) as thumbnail_image:
+            self.assertLessEqual(max(thumbnail_image.size), 640)

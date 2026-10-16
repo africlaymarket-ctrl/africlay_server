@@ -43,7 +43,7 @@ def optimized_webp(source, *, max_dimension, quality=82, filename=None):
 
 
 def marketplace_image_variants(upload):
-    source = _source_bytes(upload)
+    source = upload if isinstance(upload, bytes) else _source_bytes(upload)
     identifier = uuid4().hex
     return (
         optimized_webp(source, max_dimension=1600, quality=82, filename=f'{identifier}-detail.webp'),
