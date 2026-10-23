@@ -7,6 +7,8 @@ Environment-specific settings are defined in local.py, dev.py, and prod.py.
 
 import os
 from pathlib import Path
+
+from corsheaders.defaults import default_headers
 from dotenv import load_dotenv
 from django.core.exceptions import ImproperlyConfigured
 
@@ -100,6 +102,7 @@ CORS_ALLOWED_ORIGINS = [
     if origin.strip()
 ]
 CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_HEADERS = (*default_headers, 'idempotency-key')
 CORS_EXPOSE_HEADERS = ['Server-Timing']
 CSRF_TRUSTED_ORIGINS = [
     origin.strip()

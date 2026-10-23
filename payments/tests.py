@@ -10,7 +10,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
@@ -47,6 +47,21 @@ from payments.services import (
 )
 
 from .models import Payment, PaymentStatus
+
+
+@override_settings(CORS_ALLOWED_ORIGINS=['https://www.africlaymarket.com'])
+class PaymentCorsTests(SimpleTestCase):
+    def test_wallet_top_up_allows_idempotency_header_from_web(self):
+        response = self.client.options(
+            '/api/payments/mpesa/stk-push/',
+            HTTP_ORIGIN='https://www.africlaymarket.com',
+            HTTP_ACCESS_CONTROL_REQUEST_METHOD='POST',
+            HTTP_ACCESS_CONTROL_REQUEST_HEADERS='authorization,content-type,idempotency-key',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        allowed_headers = response.headers['Access-Control-Allow-Headers'].lower()
+        self.assertIn('idempotency-key', allowed_headers)
 
 
 @override_settings(
