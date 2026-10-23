@@ -22,6 +22,10 @@ class Wallet(TimestampedModel):
     currency = models.CharField(max_length=3, validators=[currency_code_validator])
     balance = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     held_balance = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    shopping_balance = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    shopping_held_balance = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    earnings_balance = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    earnings_held_balance = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     is_frozen = models.BooleanField(default=False)
 
     class Meta:
@@ -30,12 +34,32 @@ class Wallet(TimestampedModel):
             models.CheckConstraint(condition=models.Q(balance__gte=0), name='wallet_balance_nonnegative'),
             models.CheckConstraint(condition=models.Q(held_balance__gte=0), name='wallet_held_nonnegative'),
             models.CheckConstraint(condition=models.Q(held_balance__lte=models.F('balance')), name='wallet_holds_within_balance'),
+            models.CheckConstraint(condition=models.Q(shopping_balance__gte=0), name='wallet_shopping_nonnegative'),
+            models.CheckConstraint(condition=models.Q(shopping_held_balance__gte=0), name='wallet_shopping_held_nonnegative'),
+            models.CheckConstraint(
+                condition=models.Q(shopping_held_balance__lte=models.F('shopping_balance')),
+                name='wallet_shopping_holds_within_balance',
+            ),
+            models.CheckConstraint(condition=models.Q(earnings_balance__gte=0), name='wallet_earnings_nonnegative'),
+            models.CheckConstraint(condition=models.Q(earnings_held_balance__gte=0), name='wallet_earnings_held_nonnegative'),
+            models.CheckConstraint(
+                condition=models.Q(earnings_held_balance__lte=models.F('earnings_balance')),
+                name='wallet_earnings_holds_within_balance',
+            ),
         ]
         ordering = ['currency']
 
     @property
     def available_balance(self):
         return self.balance - self.held_balance
+
+    @property
+    def shopping_available_balance(self):
+        return self.shopping_balance - self.shopping_held_balance
+
+    @property
+    def earnings_available_balance(self):
+        return self.earnings_balance - self.earnings_held_balance
 
     def __str__(self):
         return f'{self.user.email} {self.currency} wallet'
@@ -52,13 +76,25 @@ class WalletTransactionType(models.TextChoices):
     WITHDRAWAL = 'withdrawal', 'Withdrawal'
 
 
+class WalletBalanceSource(models.TextChoices):
+    SHOPPING = 'shopping', 'Shopping Funds'
+    EARNINGS = 'earnings', 'Seller Earnings'
+
+
 class WalletTransaction(TimestampedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     wallet = models.ForeignKey(Wallet, on_delete=models.PROTECT, related_name='transactions')
     transaction_type = models.CharField(max_length=24, choices=WalletTransactionType.choices)
+    balance_source = models.CharField(
+        max_length=16,
+        choices=WalletBalanceSource.choices,
+        default=WalletBalanceSource.SHOPPING,
+    )
     amount = models.DecimalField(max_digits=14, decimal_places=2, validators=[MinValueValidator(0.01)])
     balance_after = models.DecimalField(max_digits=14, decimal_places=2)
     held_balance_after = models.DecimalField(max_digits=14, decimal_places=2)
+    source_balance_after = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    source_held_balance_after = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     reference = models.CharField(max_length=128, unique=True)
     metadata = models.JSONField(default=dict, blank=True)
 
@@ -115,6 +151,11 @@ class Payout(TimestampedModel):
         default=PayoutProvider.MPESA,
     )
     amount = models.DecimalField(max_digits=14, decimal_places=2, validators=[MinValueValidator(1)])
+    balance_source = models.CharField(
+        max_length=16,
+        choices=WalletBalanceSource.choices,
+        default=WalletBalanceSource.EARNINGS,
+    )
     currency = models.CharField(max_length=3, validators=[currency_code_validator], default='KES')
     status = models.CharField(
         max_length=16,

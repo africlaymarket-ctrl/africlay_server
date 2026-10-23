@@ -25,7 +25,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import UserRateThrottle
 
 from authapp.models import AdminAuditLog
-from authapp.permissions import IsBuyer, IsFinance, IsSeller, IsSuperAdmin, IsVerifiedUser
+from authapp.permissions import IsBuyer, IsFinance, IsSuperAdmin, IsVerifiedUser
 from shopping.models import Order, OrderStatus, PaymentOption
 from store_management.models import StoreKYCStatus
 
@@ -36,6 +36,7 @@ from .gateways.mpesa import (
 from .models import (
     Payment, PaymentAttempt, PaymentAttemptStatus, PaymentPurpose, PaymentStatus,
     LedgerEntry, LedgerEntryType, Payout, PayoutAccount, PayoutStatus, Wallet,
+    WalletBalanceSource,
     WalletTransaction,
 )
 from .serializers import (
@@ -130,17 +131,15 @@ def update_pending_payout(payout, *, payout_status, failure_code='', failure_mes
 
 class PayoutAccountView(generics.GenericAPIView):
     serializer_class = PayoutAccountSerializer
-    permission_classes = [IsAuthenticated, IsVerifiedUser, IsSeller]
+    permission_classes = [IsAuthenticated, IsVerifiedUser]
 
     @extend_schema(responses=PayoutAccountSerializer)
     def get(self, request, *args, **kwargs):
-        require_payout_eligible_seller(request.user)
         account = PayoutAccount.objects.filter(user=request.user).first()
         return Response(PayoutAccountSerializer(account).data if account else None)
 
     @extend_schema(request=PayoutAccountUpdateSerializer, responses=PayoutAccountSerializer)
     def put(self, request, *args, **kwargs):
-        require_payout_eligible_seller(request.user)
         serializer = PayoutAccountUpdateSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         phone_number = serializer.validated_data['phone_number']
@@ -166,7 +165,7 @@ class PayoutAccountView(generics.GenericAPIView):
 
 class PayoutListCreateView(generics.GenericAPIView):
     serializer_class = PayoutSerializer
-    permission_classes = [IsAuthenticated, IsVerifiedUser, IsSeller]
+    permission_classes = [IsAuthenticated, IsVerifiedUser]
     pagination_class = WalletTransactionPagination
 
     def get_throttles(self):
@@ -180,10 +179,11 @@ class PayoutListCreateView(generics.GenericAPIView):
 
     @extend_schema(request=PayoutRequestSerializer, responses=PayoutSerializer)
     def post(self, request, *args, **kwargs):
-        require_payout_eligible_seller(request.user)
         serializer = PayoutRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        amount = serializer.validated_data['amount']
+        balance_source = serializer.validated_data['balance_source']
+        if balance_source == WalletBalanceSource.EARNINGS:
+            require_payout_eligible_seller(request.user)
         idempotency_key = request.headers.get('Idempotency-Key', '').strip()
         if not idempotency_key or len(idempotency_key) > 100:
             raise ValidationError({'Idempotency-Key': 'A key of 1 to 100 characters is required.'})
@@ -198,7 +198,7 @@ class PayoutListCreateView(generics.GenericAPIView):
             wallet = Wallet.objects.select_for_update().get(pk=wallet.pk)
             existing = Payout.objects.filter(wallet=wallet, idempotency_key=idempotency_key).first()
             if existing:
-                if existing.amount != amount or existing.payout_account_id != account.pk:
+                if existing.balance_source != balance_source or existing.payout_account_id != account.pk:
                     return Response(
                         {'detail': 'Idempotency key was already used with different payout details.'},
                         status=status.HTTP_409_CONFLICT,
@@ -206,13 +206,34 @@ class PayoutListCreateView(generics.GenericAPIView):
                 return Response(PayoutSerializer(existing).data)
             if wallet.is_frozen:
                 raise ValidationError({'wallet': 'Wallet activity is temporarily unavailable.'})
-            if wallet.available_balance < amount:
-                raise ValidationError({'amount': 'The requested amount exceeds your available balance.'})
+            amount = (
+                wallet.shopping_available_balance
+                if balance_source == WalletBalanceSource.SHOPPING
+                else wallet.earnings_available_balance
+            )
+            minimum = Decimal(str(settings.MPESA_B2C_MIN_AMOUNT))
+            maximum = Decimal(str(settings.MPESA_B2C_MAX_AMOUNT))
+            if amount < minimum:
+                raise ValidationError({
+                    'balance_source': f'M-Pesa withdrawals require at least KSh {minimum:,.0f}.',
+                })
+            if amount > maximum:
+                raise ValidationError({
+                    'balance_source': (
+                        f'This balance exceeds the KSh {maximum:,.0f} M-Pesa transfer limit. '
+                        'Contact support to arrange the withdrawal safely.'
+                    ),
+                })
+            if amount != amount.to_integral_value():
+                raise ValidationError({
+                    'balance_source': 'M-Pesa can only withdraw whole KES amounts. Contact support for this balance.',
+                })
 
             payout = Payout.objects.create(
                 wallet=wallet,
                 payout_account=account,
                 amount=amount,
+                balance_source=balance_source,
                 currency=wallet.currency,
                 destination_phone=account.phone_number,
                 destination_name=account.account_name,
@@ -220,7 +241,12 @@ class PayoutListCreateView(generics.GenericAPIView):
                 callback_token_hash=hashlib.sha256(callback_token.encode()).hexdigest(),
                 originator_conversation_id=f'AFRICLAY-{uuid.uuid4().hex}',
             )
-            place_escrow_hold(wallet, amount, f'payout:{payout.pk}:reserve')
+            place_escrow_hold(
+                wallet,
+                amount,
+                f'payout:{payout.pk}:reserve',
+                balance_source,
+            )
 
         try:
             provider_response = MpesaB2CGateway().initiate_payout(
@@ -233,7 +259,7 @@ class PayoutListCreateView(generics.GenericAPIView):
                 payout,
                 succeeded=False,
                 failure_code='configuration_error',
-                failure_message='Seller payouts are temporarily unavailable.',
+                failure_message='M-Pesa withdrawals are temporarily unavailable.',
             )
             return Response(PayoutSerializer(payout).data, status=status.HTTP_201_CREATED)
         except Timeout:

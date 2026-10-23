@@ -8,10 +8,10 @@ from decimal import Decimal
 from authapp.models import UserRole
 from authapp.utils import generate_access_token
 from product_management.models import Product
-from shopping.models import Order, OrderStatus
+from shopping.models import Order, OrderStatus, PaymentStatus
 from store_management.models import Store
 from payments.models import Wallet, WalletTransaction
-from payments.services import credit_wallet
+from payments.services import credit_wallet, hold_mpesa_seller_proceeds
 from notifications.models import Notification, NotificationType
 
 
@@ -554,6 +554,51 @@ class CheckoutApiTests(TestCase):
         self.assertEqual(buyer_wallet.balance, Decimal('1300.00'))
         self.assertEqual(buyer_wallet.held_balance, Decimal('0.00'))
         self.assertEqual(self.product.stock_quantity, 10)
+
+    def test_seller_cancellation_credits_paid_mpesa_refund_to_shopping_funds(self):
+        self.authenticate_as(self.buyer)
+        self.client.post(
+            reverse('shopping:cart-item-list'),
+            {'product': str(self.product.id), 'quantity': 1},
+            format='json',
+        )
+        checkout = self.client.post(
+            reverse('shopping:checkout'),
+            {
+                'shipping_address': '123 Main St',
+                'shipping_city': 'Nairobi',
+                'shipping_postal_code': '00100',
+                'shipping_country': 'Kenya',
+                'payment_method': 'mpesa',
+            },
+            format='json',
+        )
+        order = Order.objects.get(pk=checkout.data['id'])
+        order.status = OrderStatus.PROCESSING
+        order.payment_status = PaymentStatus.PAID
+        order.amount_paid = order.total_amount
+        order.save(update_fields=['status', 'payment_status', 'amount_paid', 'updated_at'])
+        order.fulfillments.update(status=OrderStatus.PROCESSING)
+        hold_mpesa_seller_proceeds(order)
+
+        self.authenticate_as(self.seller)
+        response = self.client.patch(
+            reverse('shopping:seller-order-status', args=[order.pk]),
+            {'status': 'cancelled'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        wallet = Wallet.objects.get(user=self.buyer, currency='KES')
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, PaymentStatus.REFUNDED)
+        self.assertEqual(wallet.shopping_balance, Decimal('1220.00'))
+        self.assertEqual(wallet.earnings_balance, Decimal('0.00'))
+        self.assertTrue(WalletTransaction.objects.filter(
+            wallet=wallet,
+            transaction_type='refund',
+            balance_source='shopping',
+        ).exists())
 
     def test_seller_must_attach_tracking_before_marking_order_shipped(self):
         self.authenticate_as(self.buyer)

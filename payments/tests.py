@@ -32,7 +32,7 @@ from store_management.models import Store, StoreKYC, StoreKYCStatus
 from payments.gateways.mpesa import MpesaB2CGateway, MpesaGateway
 from payments.models import (
     PaymentAttempt, Payout, PayoutAccount, PayoutStatus, Wallet,
-    WalletTransaction, WalletTransactionType,
+    WalletBalanceSource, WalletTransaction, WalletTransactionType,
 )
 from payments.services import (
     PaymentService,
@@ -65,7 +65,8 @@ class PaymentCorsTests(SimpleTestCase):
 
 
 @override_settings(
-    SELLER_MIN_PAYOUT='500.00',
+    MPESA_B2C_MIN_AMOUNT='10.00',
+    MPESA_B2C_MAX_AMOUNT='250000.00',
     MPESA_ENVIRONMENT='sandbox',
     MPESA_BASE_URL='https://sandbox.safaricom.co.ke',
     MPESA_CONSUMER_KEY='consumer-key',
@@ -102,7 +103,12 @@ class SellerPayoutApiTests(TestCase):
             reviewed_at=timezone.now(),
         )
         self.wallet = Wallet.objects.create(user=self.seller, currency='KES')
-        credit_wallet(self.wallet, Decimal('2000.00'), 'seller-opening-balance')
+        credit_wallet(
+            self.wallet,
+            Decimal('2000.00'),
+            'seller-opening-balance',
+            WalletTransactionType.SELLER_EARNING,
+        )
         self.client.force_authenticate(self.seller)
         response = self.client.put(
             reverse('payments:payout-account'),
@@ -130,7 +136,7 @@ class SellerPayoutApiTests(TestCase):
         initiate_payout.side_effect = response_for_payout
         response = self.client.post(
             reverse('payments:payout-list'),
-            {'amount': '1000.00'},
+            {'balance_source': WalletBalanceSource.EARNINGS},
             format='json',
             HTTP_IDEMPOTENCY_KEY='seller-payout-001',
         )
@@ -139,7 +145,8 @@ class SellerPayoutApiTests(TestCase):
         self.assertEqual(response.data['status'], PayoutStatus.PROCESSING)
         self.wallet.refresh_from_db()
         self.assertEqual(self.wallet.balance, Decimal('2000.00'))
-        self.assertEqual(self.wallet.held_balance, Decimal('1000.00'))
+        self.assertEqual(self.wallet.held_balance, Decimal('2000.00'))
+        self.assertEqual(self.wallet.earnings_held_balance, Decimal('2000.00'))
 
         callback_token = initiate_payout.call_args.kwargs['callback_token']
         payout = Payout.objects.get(pk=response.data['id'])
@@ -152,7 +159,7 @@ class SellerPayoutApiTests(TestCase):
                 'TransactionID': 'PAY123ABC',
                 'ResultParameters': {
                     'ResultParameter': [
-                        {'Key': 'TransactionAmount', 'Value': 1000},
+                        {'Key': 'TransactionAmount', 'Value': 2000},
                         {'Key': 'TransactionReceipt', 'Value': 'PAY123ABC'},
                     ],
                 },
@@ -175,7 +182,8 @@ class SellerPayoutApiTests(TestCase):
         self.wallet.refresh_from_db()
         self.assertEqual(payout.status, PayoutStatus.SUCCEEDED)
         self.assertEqual(payout.transaction_receipt, 'PAY123ABC')
-        self.assertEqual(self.wallet.balance, Decimal('1000.00'))
+        self.assertEqual(self.wallet.balance, Decimal('0.00'))
+        self.assertEqual(self.wallet.earnings_balance, Decimal('0.00'))
         self.assertEqual(self.wallet.held_balance, Decimal('0.00'))
         self.assertEqual(WalletTransaction.objects.filter(
             wallet=self.wallet,
@@ -194,7 +202,7 @@ class SellerPayoutApiTests(TestCase):
         initiate_payout.side_effect = accepted
         response = self.client.post(
             reverse('payments:payout-list'),
-            {'amount': '500.00'},
+            {'balance_source': WalletBalanceSource.EARNINGS},
             format='json',
             HTTP_IDEMPOTENCY_KEY='seller-payout-failed',
         )
@@ -228,20 +236,20 @@ class SellerPayoutApiTests(TestCase):
         }
         first = self.client.post(
             reverse('payments:payout-list'),
-            {'amount': '500.00'},
+            {'balance_source': WalletBalanceSource.EARNINGS},
             format='json',
             HTTP_IDEMPOTENCY_KEY='same-payout-key',
         )
         repeated = self.client.post(
             reverse('payments:payout-list'),
-            {'amount': '500.00'},
+            {'balance_source': WalletBalanceSource.EARNINGS},
             format='json',
             HTTP_IDEMPOTENCY_KEY='same-payout-key',
         )
 
         self.assertEqual(first.data['id'], repeated.data['id'])
         self.wallet.refresh_from_db()
-        self.assertEqual(self.wallet.held_balance, Decimal('500.00'))
+        self.assertEqual(self.wallet.held_balance, Decimal('2000.00'))
         self.assertEqual(initiate_payout.call_count, 1)
 
     @patch('payments.views.MpesaB2CGateway.initiate_payout')
@@ -261,7 +269,7 @@ class SellerPayoutApiTests(TestCase):
         initiate_payout.side_effect = completes_before_acknowledgement
         response = self.client.post(
             reverse('payments:payout-list'),
-            {'amount': '500.00'},
+            {'balance_source': WalletBalanceSource.EARNINGS},
             format='json',
             HTTP_IDEMPOTENCY_KEY='fast-provider-result',
         )
@@ -272,7 +280,7 @@ class SellerPayoutApiTests(TestCase):
         self.wallet.refresh_from_db()
         self.assertEqual(payout.status, PayoutStatus.SUCCEEDED)
         self.assertEqual(payout.transaction_receipt, 'FAST123ABC')
-        self.assertEqual(self.wallet.balance, Decimal('1500.00'))
+        self.assertEqual(self.wallet.balance, Decimal('0.00'))
         self.assertEqual(self.wallet.held_balance, Decimal('0.00'))
 
     def test_payout_number_change_requires_current_password(self):
@@ -284,6 +292,69 @@ class SellerPayoutApiTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(PayoutAccount.objects.get(user=self.seller).phone_number, '254712345678')
+
+    @patch('payments.views.MpesaB2CGateway.initiate_payout')
+    def test_seller_earnings_withdrawal_does_not_reserve_shopping_funds(self, initiate_payout):
+        credit_wallet(self.wallet, Decimal('300.00'), 'seller-shopping-top-up')
+        initiate_payout.side_effect = lambda *, payout, callback_token: {
+            'ResponseCode': '0',
+            'OriginatorConversationID': payout.originator_conversation_id,
+            'ConversationID': 'AG_SEPARATE',
+        }
+
+        response = self.client.post(
+            reverse('payments:payout-list'),
+            {'balance_source': WalletBalanceSource.EARNINGS},
+            format='json',
+            HTTP_IDEMPOTENCY_KEY='earnings-only-payout',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED, response.data)
+        self.assertEqual(Decimal(response.data['amount']), Decimal('2000.00'))
+        self.wallet.refresh_from_db()
+        self.assertEqual(self.wallet.shopping_available_balance, Decimal('300.00'))
+        self.assertEqual(self.wallet.earnings_available_balance, Decimal('0.00'))
+        self.assertEqual(self.wallet.earnings_held_balance, Decimal('2000.00'))
+
+    @patch('payments.views.MpesaB2CGateway.initiate_payout')
+    def test_verified_buyer_withdraws_entire_shopping_balance(self, initiate_payout):
+        buyer = get_user_model().objects.create_user(
+            email='wallet-buyer@example.com',
+            password='StrongPassword123!',
+            role=UserRole.BUYER,
+            is_verified=True,
+        )
+        wallet = Wallet.objects.create(user=buyer, currency='KES')
+        credit_wallet(wallet, Decimal('275.00'), 'buyer-shopping-top-up')
+        self.client.force_authenticate(buyer)
+        account_response = self.client.put(
+            reverse('payments:payout-account'),
+            {
+                'phone_number': '254711111111',
+                'current_password': 'StrongPassword123!',
+            },
+            format='json',
+        )
+        initiate_payout.side_effect = lambda *, payout, callback_token: {
+            'ResponseCode': '0',
+            'OriginatorConversationID': payout.originator_conversation_id,
+            'ConversationID': 'AG_BUYER',
+        }
+
+        response = self.client.post(
+            reverse('payments:payout-list'),
+            {'balance_source': WalletBalanceSource.SHOPPING},
+            format='json',
+            HTTP_IDEMPOTENCY_KEY='buyer-full-balance',
+        )
+
+        self.assertEqual(account_response.status_code, status.HTTP_200_OK, account_response.data)
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED, response.data)
+        self.assertEqual(Decimal(response.data['amount']), Decimal('275.00'))
+        wallet.refresh_from_db()
+        self.assertEqual(wallet.shopping_available_balance, Decimal('0.00'))
+        self.assertEqual(wallet.shopping_held_balance, Decimal('275.00'))
+        self.assertEqual(wallet.earnings_balance, Decimal('0.00'))
 
     def test_admin_finance_endpoints_require_admin_role(self):
         denied = self.client.get(reverse('payments:admin-finance-summary'))
@@ -307,6 +378,7 @@ class SellerPayoutApiTests(TestCase):
             wallet=self.wallet,
             payout_account=account,
             amount=Decimal('500.00'),
+            balance_source=WalletBalanceSource.EARNINGS,
             currency='KES',
             status=PayoutStatus.UNKNOWN,
             destination_phone=account.phone_number,
@@ -315,7 +387,12 @@ class SellerPayoutApiTests(TestCase):
             callback_token_hash=hashlib.sha256(b'manual-token').hexdigest(),
             originator_conversation_id='AFRICLAY-MANUAL-001',
         )
-        place_escrow_hold(self.wallet, payout.amount, f'payout:{payout.pk}:reserve')
+        place_escrow_hold(
+            self.wallet,
+            payout.amount,
+            f'payout:{payout.pk}:reserve',
+            WalletBalanceSource.EARNINGS,
+        )
         admin = get_user_model().objects.create_superuser(
             email='payout-super-admin@example.com',
             password='AdminPassword123!',

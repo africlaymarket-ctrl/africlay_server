@@ -16,7 +16,7 @@ from shopping.models import (
 
 from .models import (
     LedgerEntry, LedgerEntryType, Payment, PaymentPurpose, PaymentStatus, Payout,
-    PayoutStatus, Wallet, WalletTransaction, WalletTransactionType,
+    PayoutStatus, Wallet, WalletBalanceSource, WalletTransaction, WalletTransactionType,
 )
 
 
@@ -35,7 +35,20 @@ def _validated_amount(amount):
     return normalized
 
 
-def _apply_operation(wallet, amount, reference, transaction_type):
+def _source_fields(balance_source):
+    if balance_source == WalletBalanceSource.SHOPPING:
+        return 'shopping_balance', 'shopping_held_balance'
+    if balance_source == WalletBalanceSource.EARNINGS:
+        return 'earnings_balance', 'earnings_held_balance'
+    raise WalletOperationError('A valid wallet balance source is required.')
+
+
+def _sync_wallet_totals(wallet):
+    wallet.balance = wallet.shopping_balance + wallet.earnings_balance
+    wallet.held_balance = wallet.shopping_held_balance + wallet.earnings_held_balance
+
+
+def _apply_operation(wallet, amount, reference, transaction_type, balance_source):
     if not reference or len(reference) > 128:
         raise WalletOperationError('A reference of 1 to 128 characters is required.')
     amount = _validated_amount(amount)
@@ -49,6 +62,7 @@ def _apply_operation(wallet, amount, reference, transaction_type):
                     existing.wallet_id != locked_wallet.pk
                     or existing.transaction_type != transaction_type
                     or existing.amount != amount
+                    or existing.balance_source != balance_source
                 ):
                     raise WalletOperationError('Reference was already used for a different wallet operation.')
                 return existing
@@ -61,33 +75,45 @@ def _apply_operation(wallet, amount, reference, transaction_type):
             } and locked_wallet.is_frozen:
                 raise WalletOperationError('Wallet is frozen.')
 
-            if transaction_type in {WalletTransactionType.CREDIT, WalletTransactionType.REFUND, WalletTransactionType.SELLER_EARNING}:
-                locked_wallet.balance += amount
-            elif transaction_type in {WalletTransactionType.DEBIT, WalletTransactionType.WITHDRAWAL}:
-                if locked_wallet.available_balance < amount:
-                    raise WalletOperationError('Insufficient available wallet balance.')
-                locked_wallet.balance -= amount
-            elif transaction_type == WalletTransactionType.ESCROW_HOLD:
-                if locked_wallet.available_balance < amount:
-                    raise WalletOperationError('Insufficient available wallet balance.')
-                locked_wallet.held_balance += amount
-            elif transaction_type == WalletTransactionType.ESCROW_RELEASE:
-                if locked_wallet.held_balance < amount:
-                    raise WalletOperationError('Insufficient held wallet balance.')
-                locked_wallet.held_balance -= amount
-            elif transaction_type == WalletTransactionType.ESCROW_CAPTURE:
-                if locked_wallet.held_balance < amount:
-                    raise WalletOperationError('Insufficient held wallet balance.')
-                locked_wallet.held_balance -= amount
-                locked_wallet.balance -= amount
+            balance_field, held_field = _source_fields(balance_source)
+            source_balance = getattr(locked_wallet, balance_field)
+            source_held = getattr(locked_wallet, held_field)
 
-            locked_wallet.save(update_fields=['balance', 'held_balance', 'updated_at'])
+            if transaction_type in {WalletTransactionType.CREDIT, WalletTransactionType.REFUND, WalletTransactionType.SELLER_EARNING}:
+                source_balance += amount
+            elif transaction_type in {WalletTransactionType.DEBIT, WalletTransactionType.WITHDRAWAL}:
+                if source_balance - source_held < amount:
+                    raise WalletOperationError('Insufficient available balance in this wallet section.')
+                source_balance -= amount
+            elif transaction_type == WalletTransactionType.ESCROW_HOLD:
+                if source_balance - source_held < amount:
+                    raise WalletOperationError('Insufficient available balance in this wallet section.')
+                source_held += amount
+            elif transaction_type == WalletTransactionType.ESCROW_RELEASE:
+                if source_held < amount:
+                    raise WalletOperationError('Insufficient held balance in this wallet section.')
+                source_held -= amount
+            elif transaction_type == WalletTransactionType.ESCROW_CAPTURE:
+                if source_held < amount:
+                    raise WalletOperationError('Insufficient held balance in this wallet section.')
+                source_held -= amount
+                source_balance -= amount
+
+            setattr(locked_wallet, balance_field, source_balance)
+            setattr(locked_wallet, held_field, source_held)
+            _sync_wallet_totals(locked_wallet)
+            locked_wallet.save(update_fields=[
+                balance_field, held_field, 'balance', 'held_balance', 'updated_at',
+            ])
             return WalletTransaction.objects.create(
                 wallet=locked_wallet,
                 transaction_type=transaction_type,
+                balance_source=balance_source,
                 amount=amount,
                 balance_after=locked_wallet.balance,
                 held_balance_after=locked_wallet.held_balance,
+                source_balance_after=source_balance,
+                source_held_balance_after=source_held,
                 reference=reference,
             )
     except IntegrityError:
@@ -98,12 +124,19 @@ def _apply_operation(wallet, amount, reference, transaction_type):
             existing.wallet_id == wallet.pk
             and existing.transaction_type == transaction_type
             and existing.amount == amount
+            and existing.balance_source == balance_source
         ):
             return existing
         raise WalletOperationError('Reference was already used for a different wallet operation.') from None
 
 
-def credit_wallet(wallet, amount, reference, transaction_type=WalletTransactionType.CREDIT):
+def credit_wallet(
+    wallet,
+    amount,
+    reference,
+    transaction_type=WalletTransactionType.CREDIT,
+    balance_source=None,
+):
     allowed_types = {
         WalletTransactionType.CREDIT,
         WalletTransactionType.REFUND,
@@ -111,28 +144,39 @@ def credit_wallet(wallet, amount, reference, transaction_type=WalletTransactionT
     }
     if transaction_type not in allowed_types:
         raise WalletOperationError('Invalid wallet credit type.')
-    return _apply_operation(wallet, amount, reference, transaction_type)
+    source = balance_source or (
+        WalletBalanceSource.EARNINGS
+        if transaction_type == WalletTransactionType.SELLER_EARNING
+        else WalletBalanceSource.SHOPPING
+    )
+    return _apply_operation(wallet, amount, reference, transaction_type, source)
 
 
-def debit_wallet(wallet, amount, reference, transaction_type=WalletTransactionType.DEBIT):
+def debit_wallet(
+    wallet,
+    amount,
+    reference,
+    transaction_type=WalletTransactionType.DEBIT,
+    balance_source=WalletBalanceSource.SHOPPING,
+):
     if transaction_type not in {WalletTransactionType.DEBIT, WalletTransactionType.WITHDRAWAL}:
         raise WalletOperationError('Invalid wallet debit type.')
-    return _apply_operation(wallet, amount, reference, transaction_type)
+    return _apply_operation(wallet, amount, reference, transaction_type, balance_source)
 
 
-def place_escrow_hold(wallet, amount, reference):
-    return _apply_operation(wallet, amount, reference, WalletTransactionType.ESCROW_HOLD)
+def place_escrow_hold(wallet, amount, reference, balance_source=WalletBalanceSource.SHOPPING):
+    return _apply_operation(wallet, amount, reference, WalletTransactionType.ESCROW_HOLD, balance_source)
 
 
-def release_escrow_hold(wallet, amount, reference):
-    return _apply_operation(wallet, amount, reference, WalletTransactionType.ESCROW_RELEASE)
+def release_escrow_hold(wallet, amount, reference, balance_source=WalletBalanceSource.SHOPPING):
+    return _apply_operation(wallet, amount, reference, WalletTransactionType.ESCROW_RELEASE, balance_source)
 
 
-def capture_escrow_hold(wallet, amount, reference):
-    return _apply_operation(wallet, amount, reference, WalletTransactionType.ESCROW_CAPTURE)
+def capture_escrow_hold(wallet, amount, reference, balance_source=WalletBalanceSource.SHOPPING):
+    return _apply_operation(wallet, amount, reference, WalletTransactionType.ESCROW_CAPTURE, balance_source)
 
 
-def capture_withdrawal_hold(wallet, amount, reference):
+def capture_withdrawal_hold(wallet, amount, reference, balance_source):
     if not reference or len(reference) > 128:
         raise WalletOperationError('A reference of 1 to 128 characters is required.')
     amount = _validated_amount(amount)
@@ -146,22 +190,34 @@ def capture_withdrawal_hold(wallet, amount, reference):
                     existing.wallet_id == locked_wallet.pk
                     and existing.transaction_type == WalletTransactionType.WITHDRAWAL
                     and existing.amount == amount
+                    and existing.balance_source == balance_source
                 ):
                     return existing
                 raise WalletOperationError('Reference was already used for a different wallet operation.')
 
-            if locked_wallet.held_balance < amount:
+            balance_field, held_field = _source_fields(balance_source)
+            source_balance = getattr(locked_wallet, balance_field)
+            source_held = getattr(locked_wallet, held_field)
+            if source_held < amount:
                 raise WalletOperationError('Insufficient reserved wallet balance.')
 
-            locked_wallet.held_balance -= amount
-            locked_wallet.balance -= amount
-            locked_wallet.save(update_fields=['balance', 'held_balance', 'updated_at'])
+            source_held -= amount
+            source_balance -= amount
+            setattr(locked_wallet, balance_field, source_balance)
+            setattr(locked_wallet, held_field, source_held)
+            _sync_wallet_totals(locked_wallet)
+            locked_wallet.save(update_fields=[
+                balance_field, held_field, 'balance', 'held_balance', 'updated_at',
+            ])
             return WalletTransaction.objects.create(
                 wallet=locked_wallet,
                 transaction_type=WalletTransactionType.WITHDRAWAL,
+                balance_source=balance_source,
                 amount=amount,
                 balance_after=locked_wallet.balance,
                 held_balance_after=locked_wallet.held_balance,
+                source_balance_after=source_balance,
+                source_held_balance_after=source_held,
                 reference=reference,
             )
     except IntegrityError:
@@ -171,6 +227,7 @@ def capture_withdrawal_hold(wallet, amount, reference):
             and existing.wallet_id == wallet.pk
             and existing.transaction_type == WalletTransactionType.WITHDRAWAL
             and existing.amount == amount
+            and existing.balance_source == balance_source
         ):
             return existing
         raise WalletOperationError('Reference was already used for a different wallet operation.') from None
@@ -209,6 +266,7 @@ def resolve_payout(
             locked.wallet,
             locked.amount,
             f'payout:{locked.pk}:withdrawal',
+            locked.balance_source,
         )
         locked.transaction_receipt = receipt[:64]
         locked.failure_code = ''
@@ -218,6 +276,7 @@ def resolve_payout(
             locked.wallet,
             locked.amount,
             f'payout:{locked.pk}:release',
+            locked.balance_source,
         )
         locked.failure_code = str(failure_code)[:40]
         locked.failure_message = str(failure_message or 'Payout was not completed.')[:255]
@@ -282,29 +341,41 @@ def transfer_escrow_to_wallet(source_wallet, destination_wallet, amount, referen
 
         if source.is_frozen:
             raise WalletOperationError('Wallet is frozen.')
-        if source.held_balance < amount:
-            raise WalletOperationError('Insufficient held wallet balance.')
+        if source.shopping_held_balance < amount:
+            raise WalletOperationError('Insufficient held shopping balance.')
 
-        source.balance -= amount
-        source.held_balance -= amount
-        destination.balance += amount
-        source.save(update_fields=['balance', 'held_balance', 'updated_at'])
-        destination.save(update_fields=['balance', 'updated_at'])
+        source.shopping_balance -= amount
+        source.shopping_held_balance -= amount
+        destination.earnings_balance += amount
+        _sync_wallet_totals(source)
+        _sync_wallet_totals(destination)
+        source.save(update_fields=[
+            'shopping_balance', 'shopping_held_balance', 'balance', 'held_balance', 'updated_at',
+        ])
+        destination.save(update_fields=[
+            'earnings_balance', 'balance', 'held_balance', 'updated_at',
+        ])
 
         source_entry = WalletTransaction.objects.create(
             wallet=source,
             transaction_type=WalletTransactionType.ESCROW_CAPTURE,
+            balance_source=WalletBalanceSource.SHOPPING,
             amount=amount,
             balance_after=source.balance,
             held_balance_after=source.held_balance,
+            source_balance_after=source.shopping_balance,
+            source_held_balance_after=source.shopping_held_balance,
             reference=source_reference,
         )
         destination_entry = WalletTransaction.objects.create(
             wallet=destination,
             transaction_type=WalletTransactionType.SELLER_EARNING,
+            balance_source=WalletBalanceSource.EARNINGS,
             amount=amount,
             balance_after=destination.balance,
             held_balance_after=destination.held_balance,
+            source_balance_after=destination.earnings_balance,
+            source_held_balance_after=destination.earnings_held_balance,
             reference=destination_reference,
         )
         return source_entry, destination_entry
@@ -353,6 +424,7 @@ def hold_mpesa_seller_proceeds(order):
             wallet,
             fulfillment.seller_proceeds,
             f'order:{order.pk}:seller:{fulfillment.seller_id}:hold',
+            WalletBalanceSource.EARNINGS,
         )
         record_ledger_entry(
             order=order,

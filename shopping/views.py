@@ -10,9 +10,10 @@ from decimal import Decimal, ROUND_HALF_UP
 from authapp.permissions import IsAuthenticated, IsBuyer, IsSeller, IsVerifiedUser
 from product_management.models import Product
 
-from payments.models import LedgerEntryType, Wallet
+from payments.models import LedgerEntryType, Wallet, WalletBalanceSource, WalletTransactionType
 from payments.services import (
     capture_escrow_hold,
+    credit_wallet,
     hold_mpesa_seller_proceeds,
     record_ledger_entry,
     WalletOperationError,
@@ -500,16 +501,28 @@ class SellerOrderStatusUpdateView(generics.GenericAPIView):
                                 seller_wallet,
                                 fulfillment.seller_proceeds,
                                 f'order:{order.pk}:seller:{request.user.pk}:hold-reversal',
+                                WalletBalanceSource.EARNINGS,
                             )
                         except (Wallet.DoesNotExist, WalletOperationError) as error:
                             raise ValidationError({'payment': str(error)}) from error
+                    buyer_wallet, _ = Wallet.objects.get_or_create(
+                        user=order.buyer,
+                        currency=order.currency,
+                    )
+                    credit_wallet(
+                        buyer_wallet,
+                        refundable_amount,
+                        f'order:{order.pk}:seller:{request.user.pk}:refund-credit',
+                        WalletTransactionType.REFUND,
+                        WalletBalanceSource.SHOPPING,
+                    )
                     record_ledger_entry(
                         order=order,
                         user=order.buyer,
-                        entry_type=LedgerEntryType.REFUND_DUE,
+                        entry_type=LedgerEntryType.REFUND_COMPLETED,
                         amount=refundable_amount,
-                        reference=f'order:{order.pk}:seller:{request.user.pk}:refund-due',
-                        metadata={'provider': order.payment_method},
+                        reference=f'order:{order.pk}:seller:{request.user.pk}:refund-completed',
+                        metadata={'provider': order.payment_method, 'destination': 'shopping_wallet'},
                     )
 
                 order.item_subtotal = max(
@@ -560,8 +573,7 @@ class SellerOrderStatusUpdateView(generics.GenericAPIView):
             active_states = [value for value in fulfillment_states if value != OrderStatus.CANCELLED]
             if not active_states:
                 order.status = OrderStatus.CANCELLED
-                if order.payment_method == PaymentMethod.WALLET:
-                    order.payment_status = PaymentStatus.REFUNDED
+                order.payment_status = PaymentStatus.REFUNDED
             elif all(value == OrderStatus.SHIPPED for value in active_states):
                 order.status = OrderStatus.SHIPPED
             else:
@@ -665,6 +677,7 @@ class OrderDeliveryConfirmationView(generics.GenericAPIView):
                             seller_wallet,
                             fulfillment.seller_proceeds,
                             f'order:{order.pk}:seller:{fulfillment.seller_id}:release',
+                            WalletBalanceSource.EARNINGS,
                         )
                     record_ledger_entry(
                         order=order,

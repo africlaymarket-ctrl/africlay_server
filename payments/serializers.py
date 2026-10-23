@@ -1,12 +1,12 @@
 import re
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 from django.conf import settings
 from rest_framework import serializers
 
 from .models import (
     LedgerEntry, Payment, PaymentAttempt, PaymentPurpose, Payout, PayoutAccount, PayoutStatus,
-    Wallet, WalletTransaction,
+    Wallet, WalletBalanceSource, WalletTransaction,
 )
 
 
@@ -28,14 +28,23 @@ def masked_phone(value):
 class WalletSerializer(serializers.ModelSerializer):
     available_balance = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     pending_payout_balance = serializers.SerializerMethodField()
+    shopping_pending_payout_balance = serializers.SerializerMethodField()
+    earnings_pending_payout_balance = serializers.SerializerMethodField()
     order_held_balance = serializers.SerializerMethodField()
-    minimum_payout = serializers.SerializerMethodField()
+    shopping_available_balance = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    earnings_available_balance = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    withdrawal_minimum = serializers.SerializerMethodField()
+    withdrawal_maximum = serializers.SerializerMethodField()
 
     class Meta:
         model = Wallet
         fields = [
             'id', 'currency', 'balance', 'held_balance', 'available_balance',
-            'pending_payout_balance', 'order_held_balance', 'minimum_payout',
+            'shopping_balance', 'shopping_held_balance', 'shopping_available_balance',
+            'earnings_balance', 'earnings_held_balance', 'earnings_available_balance',
+            'pending_payout_balance', 'shopping_pending_payout_balance',
+            'earnings_pending_payout_balance', 'order_held_balance',
+            'withdrawal_minimum', 'withdrawal_maximum',
             'is_frozen', 'created_at',
         ]
         read_only_fields = fields
@@ -52,11 +61,29 @@ class WalletSerializer(serializers.ModelSerializer):
         pending = self.get_pending_payout_balance(wallet)
         return max(wallet.held_balance - pending, Decimal('0.00'))
 
-    def get_minimum_payout(self, wallet) -> Decimal:
-        try:
-            return Decimal(str(settings.SELLER_MIN_PAYOUT))
-        except (InvalidOperation, TypeError, ValueError):
-            return Decimal('500.00')
+    def get_shopping_pending_payout_balance(self, wallet) -> Decimal:
+        return sum(
+            (payout.amount for payout in wallet.payouts.filter(
+                balance_source=WalletBalanceSource.SHOPPING,
+                status__in=[PayoutStatus.REQUESTED, PayoutStatus.PROCESSING, PayoutStatus.UNKNOWN],
+            )),
+            Decimal('0.00'),
+        )
+
+    def get_earnings_pending_payout_balance(self, wallet) -> Decimal:
+        return sum(
+            (payout.amount for payout in wallet.payouts.filter(
+                balance_source=WalletBalanceSource.EARNINGS,
+                status__in=[PayoutStatus.REQUESTED, PayoutStatus.PROCESSING, PayoutStatus.UNKNOWN],
+            )),
+            Decimal('0.00'),
+        )
+
+    def get_withdrawal_minimum(self, wallet) -> Decimal:
+        return Decimal(str(settings.MPESA_B2C_MIN_AMOUNT))
+
+    def get_withdrawal_maximum(self, wallet) -> Decimal:
+        return Decimal(str(settings.MPESA_B2C_MAX_AMOUNT))
 
 
 class WalletCreateSerializer(serializers.ModelSerializer):
@@ -76,7 +103,8 @@ class WalletTransactionSerializer(serializers.ModelSerializer):
         model = WalletTransaction
         fields = [
             'id', 'transaction_type', 'amount', 'balance_after',
-            'held_balance_after', 'reference', 'created_at',
+            'balance_source', 'held_balance_after', 'source_balance_after',
+            'source_held_balance_after', 'reference', 'created_at',
         ]
         read_only_fields = fields
 
@@ -201,18 +229,7 @@ class PayoutAccountUpdateSerializer(serializers.Serializer):
 
 
 class PayoutRequestSerializer(serializers.Serializer):
-    amount = serializers.DecimalField(max_digits=14, decimal_places=2)
-
-    def validate_amount(self, value):
-        try:
-            minimum = Decimal(str(settings.SELLER_MIN_PAYOUT))
-        except (InvalidOperation, TypeError, ValueError):
-            minimum = Decimal('500.00')
-        if value != value.to_integral_value():
-            raise serializers.ValidationError('M-Pesa payouts must be requested in whole KES amounts.')
-        if value < minimum:
-            raise serializers.ValidationError(f'The minimum payout is KSh {minimum:,.0f}.')
-        return value
+    balance_source = serializers.ChoiceField(choices=WalletBalanceSource.choices)
 
 
 class PayoutSerializer(serializers.ModelSerializer):
@@ -222,7 +239,7 @@ class PayoutSerializer(serializers.ModelSerializer):
         model = Payout
         fields = [
             'id', 'provider', 'amount', 'currency', 'status', 'destination_phone',
-            'destination_name', 'transaction_receipt', 'failure_message',
+            'destination_name', 'balance_source', 'transaction_receipt', 'failure_message',
             'created_at', 'updated_at', 'processed_at',
         ]
         read_only_fields = fields
@@ -232,6 +249,9 @@ class PayoutSerializer(serializers.ModelSerializer):
 
 
 class AdminPayoutSerializer(PayoutSerializer):
+    account_id = serializers.UUIDField(source='wallet.user_id', read_only=True)
+    account_email = serializers.EmailField(source='wallet.user.email', read_only=True)
+    account_name = serializers.CharField(source='wallet.user.full_name', read_only=True)
     seller_id = serializers.UUIDField(source='wallet.user_id', read_only=True)
     seller_email = serializers.EmailField(source='wallet.user.email', read_only=True)
     seller_name = serializers.CharField(source='wallet.user.full_name', read_only=True)
@@ -240,6 +260,7 @@ class AdminPayoutSerializer(PayoutSerializer):
 
     class Meta(PayoutSerializer.Meta):
         fields = PayoutSerializer.Meta.fields + [
+            'account_id', 'account_email', 'account_name',
             'seller_id', 'seller_email', 'seller_name', 'store_name',
             'resolution_note',
         ]
