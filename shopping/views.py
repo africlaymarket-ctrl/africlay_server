@@ -61,6 +61,29 @@ def _cart_items(cart):
     )
 
 
+def _checkout_items(cart, validated_data):
+    product_id = validated_data.get('buy_now_product_id')
+    if not product_id:
+        return _cart_items(cart)
+    product = Product.objects.filter(pk=product_id).select_related(
+        'store', 'store__owner',
+    ).first()
+    if product is None:
+        raise ValidationError({'buy_now_product_id': 'This product is no longer available.'})
+    quantity = validated_data.get('buy_now_quantity', 1)
+    if product.status != 'published' or product.store.status != 'active':
+        raise ValidationError({'buy_now_product_id': 'This product is not available for purchase.'})
+    if product.stock_quantity < quantity:
+        raise ValidationError({
+            'buy_now_quantity': f'Only {product.stock_quantity} items are available.',
+        })
+    return [CartItem(
+        cart=cart,
+        product=product,
+        quantity=quantity,
+    )]
+
+
 def _shipping_quote_payload(quotes):
     item_subtotal = sum((quote.item_subtotal for quote in quotes), Decimal('0.00'))
     shipping_cost = sum((quote.shipping_cost for quote in quotes), Decimal('0.00'))
@@ -173,10 +196,8 @@ class ShippingQuoteView(generics.GenericAPIView):
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        cart = Cart.objects.filter(buyer=request.user).first()
-        if cart is None:
-            raise ValidationError({'cart': 'Cart not found.'})
-        cart_items = _cart_items(cart)
+        cart, _ = Cart.objects.get_or_create(buyer=request.user)
+        cart_items = _checkout_items(cart, serializer.validated_data)
         if not cart_items:
             raise ValidationError({'cart': 'Cannot checkout with an empty cart.'})
         try:
@@ -200,10 +221,8 @@ class CheckoutView(generics.GenericAPIView):
             raise ValidationError({'payment_option': 'Wallet checkout only supports Pay Now.'})
 
         buyer = request.user
-        cart = Cart.objects.filter(buyer=buyer).first()
-        if cart is None:
-            raise ValidationError({'cart': 'Cart not found.'})
-        cart_items = _cart_items(cart)
+        cart, _ = Cart.objects.get_or_create(buyer=buyer)
+        cart_items = _checkout_items(cart, serializer.validated_data)
         if not cart_items:
             raise ValidationError({'cart': 'Cannot checkout with an empty cart.'})
 
@@ -362,7 +381,8 @@ class CheckoutView(generics.GenericAPIView):
                         notification_type=NotificationType.ORDER,
                     )
 
-                CartItem.objects.filter(cart=cart).delete()
+                if not serializer.validated_data.get('buy_now_product_id'):
+                    CartItem.objects.filter(cart=cart).delete()
 
         except WalletOperationError as e:
             raise ValidationError({'payment': str(e)})

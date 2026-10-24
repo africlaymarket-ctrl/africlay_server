@@ -191,6 +191,15 @@ class CreateCheckoutSerializer(serializers.Serializer):
         required=False,
         default=PaymentOption.PAY_NOW,
     )
+    buy_now_product_id = serializers.UUIDField(required=False)
+    buy_now_quantity = serializers.IntegerField(required=False, min_value=1, max_value=99)
+
+    def validate(self, attrs):
+        if 'buy_now_quantity' in attrs and 'buy_now_product_id' not in attrs:
+            raise serializers.ValidationError({
+                'buy_now_product_id': 'A product is required when a Buy Now quantity is provided.',
+            })
+        return attrs
 
     def validate_shipping_address(self, value):
         if not value or len(value.strip()) == 0:

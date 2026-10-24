@@ -8,7 +8,7 @@ from decimal import Decimal
 from authapp.models import UserRole
 from authapp.utils import generate_access_token
 from product_management.models import Product
-from shopping.models import Order, OrderStatus, PaymentStatus
+from shopping.models import Cart, Order, OrderStatus, PaymentStatus
 from store_management.models import Store
 from payments.models import Wallet, WalletTransaction
 from payments.services import credit_wallet, hold_mpesa_seller_proceeds
@@ -344,6 +344,60 @@ class CheckoutApiTests(TestCase):
         # Verify cart is now empty
         cart_response = self.client.get(reverse('shopping:cart-detail'))
         self.assertEqual(len(cart_response.data['items']), 0)
+
+    def test_buy_now_checks_out_one_product_and_preserves_the_cart(self):
+        self.authenticate_as(self.buyer)
+        self.client.post(
+            reverse('shopping:cart-item-list'),
+            {'product': str(self.product.id), 'quantity': 2},
+            format='json',
+        )
+        self.client.post(
+            reverse('shopping:cart-item-list'),
+            {'product': str(self.product2.id), 'quantity': 3},
+            format='json',
+        )
+        payload = {
+            'shipping_address': '123 Main St',
+            'shipping_city': 'Nairobi',
+            'shipping_postal_code': '00100',
+            'shipping_country': 'Kenya',
+            'buy_now_product_id': str(self.product2.id),
+            'buy_now_quantity': 1,
+        }
+
+        quote = self.client.post(reverse('shopping:shipping-quote'), payload, format='json')
+        checkout = self.client.post(reverse('shopping:checkout'), payload, format='json')
+
+        self.assertEqual(quote.status_code, status.HTTP_200_OK, quote.data)
+        self.assertEqual(Decimal(quote.data['item_subtotal']), Decimal('500.00'))
+        self.assertEqual(checkout.status_code, status.HTTP_201_CREATED, checkout.data)
+        order = Order.objects.get(pk=checkout.data['id'])
+        order_item = order.items.get()
+        self.assertEqual(order_item.product_id, self.product2.id)
+        self.assertEqual(order_item.quantity, 1)
+        cart = Cart.objects.get(buyer=self.buyer)
+        self.assertEqual(
+            list(cart.items.order_by('product__sku').values_list('quantity', flat=True)),
+            [2, 3],
+        )
+
+    def test_buy_now_quantity_without_product_is_rejected(self):
+        self.authenticate_as(self.buyer)
+        response = self.client.post(
+            reverse('shopping:shipping-quote'),
+            {
+                'shipping_address': '123 Main St',
+                'shipping_city': 'Nairobi',
+                'shipping_postal_code': '00100',
+                'shipping_country': 'Kenya',
+                'buy_now_quantity': 1,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('buy_now_product_id', response.data)
 
     def test_mpesa_checkout_creates_pending_order(self):
         self.authenticate_as(self.buyer)
