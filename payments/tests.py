@@ -3,11 +3,13 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
+from importlib import import_module
 from unittest.mock import patch
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.test import SimpleTestCase, TestCase, override_settings
@@ -62,6 +64,55 @@ class PaymentCorsTests(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
         allowed_headers = response.headers['Access-Control-Allow-Headers'].lower()
         self.assertIn('idempotency-key', allowed_headers)
+
+
+class WalletBalancePocketMigrationTests(TestCase):
+    def test_legacy_seller_earnings_are_backfilled_from_the_ledger(self):
+        seller = get_user_model().objects.create_user(
+            email='legacy-wallet@example.com',
+            password='StrongPassword123!',
+            role=UserRole.SELLER,
+        )
+        wallet = Wallet.objects.create(
+            user=seller,
+            currency='KES',
+            balance=Decimal('270.00'),
+        )
+        entries = [
+            (WalletTransactionType.SELLER_EARNING, '180.00', '180.00', '0.00', 'first:earning'),
+            (WalletTransactionType.ESCROW_HOLD, '180.00', '180.00', '180.00', 'first:seller:hold'),
+            (WalletTransactionType.ESCROW_RELEASE, '180.00', '180.00', '0.00', 'first:seller:release'),
+            (WalletTransactionType.SELLER_EARNING, '90.00', '270.00', '0.00', 'second:earning'),
+            (WalletTransactionType.ESCROW_HOLD, '90.00', '270.00', '90.00', 'second:seller:hold'),
+            (WalletTransactionType.ESCROW_RELEASE, '90.00', '270.00', '0.00', 'second:seller:release'),
+        ]
+        for transaction_type, amount, balance_after, held_after, reference in entries:
+            WalletTransaction.objects.create(
+                wallet=wallet,
+                transaction_type=transaction_type,
+                amount=Decimal(amount),
+                balance_after=Decimal(balance_after),
+                held_balance_after=Decimal(held_after),
+                reference=reference,
+            )
+
+        migration = import_module('payments.migrations.0007_backfill_wallet_balance_pockets')
+        migration.backfill_wallet_balance_pockets(django_apps, None)
+        migration.backfill_wallet_balance_pockets(django_apps, None)
+
+        wallet.refresh_from_db()
+        self.assertEqual(wallet.balance, Decimal('270.00'))
+        self.assertEqual(wallet.shopping_balance, Decimal('0.00'))
+        self.assertEqual(wallet.shopping_held_balance, Decimal('0.00'))
+        self.assertEqual(wallet.earnings_balance, Decimal('270.00'))
+        self.assertEqual(wallet.earnings_held_balance, Decimal('0.00'))
+        self.assertFalse(
+            wallet.transactions.exclude(balance_source=WalletBalanceSource.EARNINGS).exists()
+        )
+        self.assertEqual(
+            wallet.transactions.order_by('created_at', 'id').last().source_balance_after,
+            Decimal('270.00'),
+        )
 
 
 @override_settings(
