@@ -247,7 +247,10 @@ class MpesaB2CGateway:
         self.base_url = getattr(settings, 'MPESA_BASE_URL', '').rstrip('/') or _configuration()
         self.initiator_name = getattr(settings, 'MPESA_B2C_INITIATOR_NAME', '').strip()
         self.security_credential = getattr(settings, 'MPESA_B2C_SECURITY_CREDENTIAL', '').strip()
-        self.shortcode = getattr(settings, 'MPESA_B2C_SHORTCODE', '').strip()
+        self.shortcode = (
+            getattr(settings, 'MPESA_B2C_SHORTCODE', '').strip()
+            or getattr(settings, 'MPESA_SHORTCODE', '').strip()
+        )
         self.command_id = getattr(settings, 'MPESA_B2C_COMMAND_ID', 'BusinessPayment').strip()
         self.callback_base_url = getattr(settings, 'MPESA_CALLBACK_BASE_URL', '').rstrip('/')
         self.timeout = getattr(settings, 'MPESA_REQUEST_TIMEOUT', 15)
@@ -292,10 +295,10 @@ class MpesaB2CGateway:
             'Amount': int(payout.amount),
             'PartyA': self.shortcode,
             'PartyB': payout.destination_phone,
-            'Remarks': f'AfriClay seller payout {str(payout.pk)[:8]}',
+            'Remarks': f'AfriClay wallet payout {str(payout.pk)[:8]}',
             'QueueTimeOutURL': timeout_url,
             'ResultURL': result_url,
-            'Occassion': 'Seller payout',
+            'Occassion': 'Wallet payout',
         }
         try:
             response = requests.post(

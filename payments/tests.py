@@ -6,6 +6,7 @@ from decimal import Decimal
 from importlib import import_module
 from unittest.mock import patch
 
+from requests import Timeout
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
@@ -407,6 +408,119 @@ class SellerPayoutApiTests(TestCase):
         self.assertEqual(wallet.shopping_held_balance, Decimal('275.00'))
         self.assertEqual(wallet.earnings_balance, Decimal('0.00'))
 
+    @patch('payments.views.MpesaB2CGateway.initiate_payout')
+    def test_client_cannot_supply_a_withdrawal_amount(self, initiate_payout):
+        response = self.client.post(
+            reverse('payments:payout-list'),
+            {'balance_source': WalletBalanceSource.EARNINGS, 'amount': '1.00'},
+            format='json',
+            HTTP_IDEMPOTENCY_KEY='client-selected-amount',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        self.assertIn('amount', response.data)
+        self.assertFalse(Payout.objects.exists())
+        initiate_payout.assert_not_called()
+
+    @override_settings(MPESA_B2C_MIN_AMOUNT='2500.00')
+    @patch('payments.views.MpesaB2CGateway.initiate_payout')
+    def test_payout_rejects_balance_below_provider_minimum(self, initiate_payout):
+        response = self.client.post(
+            reverse('payments:payout-list'),
+            {'balance_source': WalletBalanceSource.EARNINGS},
+            format='json',
+            HTTP_IDEMPOTENCY_KEY='below-minimum',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        self.assertIn('at least', str(response.data['balance_source']))
+        initiate_payout.assert_not_called()
+
+    @override_settings(MPESA_B2C_MAX_AMOUNT='1000.00')
+    @patch('payments.views.MpesaB2CGateway.initiate_payout')
+    def test_payout_rejects_balance_above_provider_maximum(self, initiate_payout):
+        response = self.client.post(
+            reverse('payments:payout-list'),
+            {'balance_source': WalletBalanceSource.EARNINGS},
+            format='json',
+            HTTP_IDEMPOTENCY_KEY='above-maximum',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        self.assertIn('exceeds', str(response.data['balance_source']))
+        initiate_payout.assert_not_called()
+
+    @patch('payments.views.MpesaB2CGateway.initiate_payout')
+    def test_frozen_wallet_rejects_payout_before_provider_call(self, initiate_payout):
+        self.wallet.is_frozen = True
+        self.wallet.save(update_fields=['is_frozen', 'updated_at'])
+
+        response = self.client.post(
+            reverse('payments:payout-list'),
+            {'balance_source': WalletBalanceSource.EARNINGS},
+            format='json',
+            HTTP_IDEMPOTENCY_KEY='frozen-wallet',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        self.assertIn('wallet', response.data)
+        self.assertFalse(Payout.objects.exists())
+        initiate_payout.assert_not_called()
+
+    @patch('payments.views.MpesaB2CGateway.initiate_payout')
+    def test_order_held_earnings_are_excluded_from_full_balance_payout(self, initiate_payout):
+        place_escrow_hold(
+            self.wallet,
+            Decimal('500.00'),
+            'order:still-held',
+            WalletBalanceSource.EARNINGS,
+        )
+        initiate_payout.side_effect = lambda *, payout, callback_token: {
+            'ResponseCode': '0',
+            'OriginatorConversationID': payout.originator_conversation_id,
+            'ConversationID': 'AG_AVAILABLE_ONLY',
+        }
+
+        response = self.client.post(
+            reverse('payments:payout-list'),
+            {'balance_source': WalletBalanceSource.EARNINGS},
+            format='json',
+            HTTP_IDEMPOTENCY_KEY='available-earnings-only',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED, response.data)
+        self.assertEqual(Decimal(response.data['amount']), Decimal('1500.00'))
+        self.wallet.refresh_from_db()
+        self.assertEqual(self.wallet.earnings_balance, Decimal('2000.00'))
+        self.assertEqual(self.wallet.earnings_held_balance, Decimal('2000.00'))
+
+    @patch('payments.views.MpesaB2CGateway.initiate_payout')
+    def test_unknown_payout_stays_reserved_and_blocks_same_source_retry(self, initiate_payout):
+        initiate_payout.side_effect = Timeout('provider timeout')
+
+        first = self.client.post(
+            reverse('payments:payout-list'),
+            {'balance_source': WalletBalanceSource.EARNINGS},
+            format='json',
+            HTTP_IDEMPOTENCY_KEY='unknown-first',
+        )
+        second = self.client.post(
+            reverse('payments:payout-list'),
+            {'balance_source': WalletBalanceSource.EARNINGS},
+            format='json',
+            HTTP_IDEMPOTENCY_KEY='unknown-second',
+        )
+
+        self.assertEqual(first.status_code, status.HTTP_202_ACCEPTED, first.data)
+        self.assertEqual(first.data['status'], PayoutStatus.UNKNOWN)
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST, second.data)
+        self.assertIn('reconciled', str(second.data['balance_source']))
+        self.assertEqual(initiate_payout.call_count, 1)
+        self.wallet.refresh_from_db()
+        self.assertEqual(self.wallet.earnings_balance, Decimal('2000.00'))
+        self.assertEqual(self.wallet.earnings_held_balance, Decimal('2000.00'))
+        self.assertEqual(Payout.objects.count(), 1)
+
     def test_admin_finance_endpoints_require_admin_role(self):
         denied = self.client.get(reverse('payments:admin-finance-summary'))
         self.assertEqual(denied.status_code, status.HTTP_403_FORBIDDEN)
@@ -479,13 +593,14 @@ class MpesaB2CGatewayTests(TestCase):
         MPESA_CALLBACK_BASE_URL='https://api.africlaymarket.com',
         MPESA_B2C_INITIATOR_NAME='testapi',
         MPESA_B2C_SECURITY_CREDENTIAL='encrypted-credential',
-        MPESA_B2C_SHORTCODE='600000',
+        MPESA_B2C_SHORTCODE='',
+        MPESA_SHORTCODE='600000',
         MPESA_B2C_COMMAND_ID='BusinessPayment',
         MPESA_B2C_PATH='/mpesa/b2c/v3/paymentrequest',
     )
     @patch('payments.gateways.mpesa.requests.post')
     @patch('payments.gateways.mpesa.requests.get')
-    def test_initiate_payout_uses_b2c_credentials_and_private_callback_token(self, get, post):
+    def test_initiate_payout_reuses_main_shortcode_and_private_callback_token(self, get, post):
         get.return_value.json.return_value = {'access_token': 'generated-token'}
         post.return_value.json.return_value = {
             'ResponseCode': '0',

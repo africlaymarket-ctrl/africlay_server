@@ -231,6 +231,13 @@ class PayoutAccountUpdateSerializer(serializers.Serializer):
 class PayoutRequestSerializer(serializers.Serializer):
     balance_source = serializers.ChoiceField(choices=WalletBalanceSource.choices)
 
+    def validate(self, attrs):
+        if 'amount' in self.initial_data:
+            raise serializers.ValidationError({
+                'amount': 'The withdrawal amount is calculated from the full eligible wallet balance.',
+            })
+        return attrs
+
 
 class PayoutSerializer(serializers.ModelSerializer):
     destination_phone = serializers.SerializerMethodField()

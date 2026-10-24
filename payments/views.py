@@ -206,6 +206,24 @@ class PayoutListCreateView(generics.GenericAPIView):
                 return Response(PayoutSerializer(existing).data)
             if wallet.is_frozen:
                 raise ValidationError({'wallet': 'Wallet activity is temporarily unavailable.'})
+            active_payout = Payout.objects.filter(
+                wallet=wallet,
+                balance_source=balance_source,
+                status__in=[
+                    PayoutStatus.REQUESTED,
+                    PayoutStatus.PROCESSING,
+                    PayoutStatus.UNKNOWN,
+                ],
+            ).order_by('-created_at').first()
+            if active_payout:
+                label = 'seller earnings' if balance_source == WalletBalanceSource.EARNINGS else 'shopping funds'
+                state = 'being reconciled' if active_payout.status == PayoutStatus.UNKNOWN else 'being processed'
+                raise ValidationError({
+                    'balance_source': (
+                        f'A {label} withdrawal is already {state}. '
+                        'Wait for it to reach a final status before requesting another.'
+                    ),
+                })
             amount = (
                 wallet.shopping_available_balance
                 if balance_source == WalletBalanceSource.SHOPPING

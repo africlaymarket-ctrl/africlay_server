@@ -71,7 +71,7 @@ services:
       - key: DEFAULT_FROM_EMAIL
         value: "no-reply@africlay.com"
       - key: MPESA_ENVIRONMENT
-        value: sandbox
+        value: production
       - key: MPESA_CONSUMER_KEY
         sync: false
       - key: MPESA_CONSUMER_SECRET
@@ -90,9 +90,9 @@ services:
         sync: false
       - key: MPESA_B2C_SECURITY_CREDENTIAL
         sync: false
-      - key: MPESA_B2C_SHORTCODE
-        sync: false
       - key: MPESA_B2C_COMMAND_ID
         value: BusinessPayment
-      - key: SELLER_MIN_PAYOUT
-        value: "500.00"
+      - key: MPESA_B2C_MIN_AMOUNT
+        value: "10.00"
+      - key: MPESA_B2C_MAX_AMOUNT
+        value: "250000.00"
