@@ -44,6 +44,33 @@ The check uploads a temporary object, reads it back, generates a signed HTTPS UR
 and removes the check object. Image URLs are signed, so the frontend must load the
 current URL returned by the API rather than cache it indefinitely.
 
+## Supabase database access
+
+AfriClay uses Django's direct PostgreSQL connection for application data. The
+frontend does not query the Supabase Data API, so Django-managed tables must not
+be exposed to the `anon` or `authenticated` Postgres roles.
+
+Migration `core.0001_secure_supabase_public_schema` enables RLS on every existing
+table in `public`, removes table and sequence privileges from those two API roles,
+and changes the migration role's default privileges so future Django tables are
+deny-by-default. It intentionally does not use `FORCE ROW LEVEL SECURITY`; the
+table owner used by Django therefore keeps normal direct access.
+
+After deploying migrations, verify the live database with:
+
+```sh
+python manage.py audit_public_database_access --fail-on-findings
+```
+
+The production Docker startup runs this audit automatically after migrations,
+so it also works on Render plans without interactive Shell access. Check the
+deployment logs for the successful `Public database access is locked down`
+message. A remaining finding stops that deploy before Gunicorn starts.
+
+This database hardening is separate from Supabase Storage bucket policies. Product
+media access and private KYC document access must continue to be managed through
+their existing Storage configuration.
+
 ## Persistent API smoke test
 
 Run the core endpoint workflow against the configured database with:
