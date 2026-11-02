@@ -129,6 +129,28 @@ def generate_otp_code(length=6):
     return "".join(secrets.choice(digits) for _ in range(length))
 
 
+def issue_otp(user, otp_type, valid_minutes=15):
+    """Invalidate older codes, store a hashed replacement, then deliver it."""
+    from .models import OTPVerification
+
+    OTPVerification.objects.filter(
+        user=user,
+        otp_type=otp_type,
+        is_used=False,
+    ).update(is_used=True)
+
+    raw_code = generate_otp_code()
+    otp_record = OTPVerification(
+        user=user,
+        otp_type=otp_type,
+        expires_at=timezone.now() + timezone.timedelta(minutes=valid_minutes),
+    )
+    otp_record.set_code(raw_code)
+    otp_record.save()
+    send_otp_email(user, raw_code, otp_type)
+    return otp_record
+
+
 def send_otp_email(user, otp_code, otp_type):
     """Render email template and dispatch OTP code to user's email."""
     if otp_type == 'email_verification':

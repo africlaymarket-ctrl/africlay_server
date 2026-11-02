@@ -6,6 +6,7 @@ from .views import (
     StoreKYCReviewView,
     StoreKYCSubmitView,
     StoreListCreateView,
+    StoreMineView,
 )
 from .operations import (
     AdminStoreDetailView,
@@ -25,6 +26,7 @@ urlpatterns = [
     path('admin/', AdminStoreListView.as_view(), name='admin-store-list'),
     path('admin/<uuid:pk>/', AdminStoreDetailView.as_view(), name='admin-store-detail'),
     path('admin/<uuid:pk>/status/', AdminStoreStatusView.as_view(), name='admin-store-status'),
+    path('mine/', StoreMineView.as_view(), name='store-mine'),
     path('<slug:slug>/', StoreDetailView.as_view(), name='store-detail'),
     path('<slug:slug>/kyc/', StoreKYCDetailView.as_view(), name='store-kyc-detail'),
     path('<slug:slug>/kyc/submit/', StoreKYCSubmitView.as_view(), name='store-kyc-submit'),

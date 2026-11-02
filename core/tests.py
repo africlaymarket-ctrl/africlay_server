@@ -6,10 +6,12 @@ from unittest.mock import Mock, patch
 
 from django.conf import settings
 from django.core.files.base import ContentFile
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
+from django.urls import reverse
 from PIL import Image
 
 from .images import marketplace_image_variants
+from .middleware import safe_request_path
 from .storage import SupabasePublicStorage, SupabaseStorage
 
 
@@ -189,3 +191,32 @@ class MarketplaceImageTests(SimpleTestCase):
             self.assertLessEqual(max(detail_image.size), 1600)
         with Image.open(thumbnail) as thumbnail_image:
             self.assertLessEqual(max(thumbnail_image.size), 640)
+
+
+class SecurityResponseTests(TestCase):
+    def test_health_check_confirms_database_readiness(self):
+        response = self.client.get(reverse('healthz'))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertJSONEqual(response.content, {'status': 'ok'})
+
+    def test_security_headers_are_added_without_overwriting_app_headers(self):
+        response = self.client.get(reverse('healthz'))
+
+        self.assertEqual(response['Referrer-Policy'], 'strict-origin-when-cross-origin')
+        self.assertEqual(
+            response['Permissions-Policy'],
+            'geolocation=(), camera=(), microphone=(), payment=()',
+        )
+        self.assertEqual(response['X-Permitted-Cross-Domain-Policies'], 'none')
+
+    def test_payment_callback_tokens_are_redacted_from_timing_logs(self):
+        self.assertEqual(
+            safe_request_path('/api/payments/payouts/provider-result/private-token/'),
+            '/api/payments/payouts/provider-result/[redacted]/',
+        )
+        self.assertEqual(
+            safe_request_path('/api/payments/mpesa/callback/payment-token/'),
+            '/api/payments/mpesa/callback/[redacted]/',
+        )
+        self.assertEqual(safe_request_path('/api/products/'), '/api/products/')

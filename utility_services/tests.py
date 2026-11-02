@@ -1,6 +1,7 @@
 from unittest.mock import patch, MagicMock
 from django.test import TestCase
 from django.urls import reverse
+from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 from rest_framework import status
 
@@ -9,6 +10,8 @@ from utility_services.utils import (
     send_sms,
     SendSMS,
 )
+
+User = get_user_model()
 
 
 class PhoneNormalizationTests(TestCase):
@@ -129,6 +132,20 @@ class SendSMSViewAPITests(TestCase):
     def setUp(self):
         self.client = APIClient()
         self.url = reverse('utility_services:send-sms')
+        self.admin = User.objects.create_superuser(
+            email='sms-admin@example.com',
+            password='AdminPassword123!',
+        )
+        self.client.force_authenticate(self.admin)
+
+    def test_api_rejects_anonymous_dispatch(self):
+        self.client.force_authenticate(user=None)
+        response = self.client.post(
+            self.url,
+            data={'phone_number': '0712345678', 'message': 'Must not send'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
     @patch("utility_services.utils.requests.post")
     def test_api_send_sms_single_number(self, mock_post):

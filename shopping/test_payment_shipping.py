@@ -133,6 +133,39 @@ class PayOnDeliveryFlowTests(TestCase):
             }},
         }
 
+    def test_delivery_fee_survives_quote_checkout_and_order_views(self):
+        payload = {
+            'shipping_address': '123 Main Street',
+            'shipping_city': 'Nairobi',
+            'shipping_postal_code': '00100',
+            'shipping_country': 'Kenya',
+            'payment_method': 'mpesa',
+            'payment_option': 'pay_now',
+        }
+        self.client.force_authenticate(self.buyer)
+        quote = self.client.post(reverse('shopping:shipping-quote'), payload, format='json')
+        checkout = self.client.post(reverse('shopping:checkout'), payload, format='json')
+        self.assertEqual(quote.status_code, status.HTTP_200_OK, quote.data)
+        self.assertEqual(checkout.status_code, status.HTTP_201_CREATED, checkout.data)
+        order = Order.objects.get(pk=checkout.data['id'])
+        expected = Decimal(quote.data['shipping_cost'])
+        self.assertGreater(expected, Decimal('0'))
+        self.assertEqual(order.shipping_cost, expected)
+        self.assertEqual(Decimal(checkout.data['shipping_cost']), expected)
+        self.assertEqual(order.total_amount, order.item_subtotal + expected)
+
+        detail = self.client.get(reverse('shopping:order-detail', args=[order.pk]))
+        self.assertEqual(detail.status_code, status.HTTP_200_OK, detail.data)
+        self.assertEqual(Decimal(detail.data['shipping_cost']), expected)
+
+        self.client.force_authenticate(self.seller)
+        seller_orders = self.client.get(reverse('shopping:seller-order-list'))
+        self.assertEqual(seller_orders.status_code, status.HTTP_200_OK, seller_orders.data)
+        records = seller_orders.data.get('results', []) if isinstance(seller_orders.data, dict) else seller_orders.data
+        seller_order = next(item for item in records if str(item['id']) == str(order.pk))
+        self.assertEqual(Decimal(seller_order['shipping_cost']), expected)
+        self.assertEqual(Decimal(seller_order['total_amount']), order.item_subtotal)
+
     @patch('payments.gateways.mpesa.MpesaGateway.initiate_payment')
     def test_delivery_fee_balance_and_seller_release_are_audited(self, initiate_payment):
         initiate_payment.side_effect = [

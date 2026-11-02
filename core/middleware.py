@@ -1,10 +1,39 @@
 import logging
+import re
 from time import perf_counter
 
 from django.db import connection
 
 
 logger = logging.getLogger('africlay.performance')
+
+
+_CALLBACK_TOKEN_PATH = re.compile(
+    r'(?P<prefix>/api/payments/(?:provider-callback|mpesa/callback|payouts/provider-(?:result|timeout))/)'
+    r'[^/]+/?$'
+)
+
+
+def safe_request_path(path):
+    """Keep short-lived payment callback tokens out of application logs."""
+    return _CALLBACK_TOKEN_PATH.sub(r'\g<prefix>[redacted]/', path)
+
+
+class SecurityHeadersMiddleware:
+    """Set conservative browser protections that do not alter API authentication."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        response.setdefault('Referrer-Policy', 'strict-origin-when-cross-origin')
+        response.setdefault(
+            'Permissions-Policy',
+            'geolocation=(), camera=(), microphone=(), payment=()',
+        )
+        response.setdefault('X-Permitted-Cross-Domain-Policies', 'none')
+        return response
 
 
 class RequestTimingMiddleware:
@@ -35,7 +64,7 @@ class RequestTimingMiddleware:
         logger.info(
             'request method=%s path=%s status=%s duration_ms=%.1f db_duration_ms=%.1f db_queries=%s',
             request.method,
-            request.path,
+            safe_request_path(request.path),
             response.status_code,
             duration_ms,
             db_duration_ms,

@@ -21,8 +21,11 @@ load_dotenv(BASE_DIR / '.env')
 # Current running environment (local, dev, prod)
 DEV_ENVIRONMENT = os.getenv('DEV_ENVIRONMENT', 'local').strip().lower()
 
-# Security key
-SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-9g1%r+q*=*6y0_q1*+@s_arj_viup-%vk-x%%_@@ef7ibz+!wv')
+# Security key. Never fall back to a repository value: production and local
+# commands must receive this through their environment.
+SECRET_KEY = os.getenv('SECRET_KEY', '').strip()
+if not SECRET_KEY:
+    raise ImproperlyConfigured('SECRET_KEY must be configured in the environment.')
 
 # Custom user model
 AUTH_USER_MODEL = 'authapp.User'
@@ -64,6 +67,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'core.middleware.SecurityHeadersMiddleware',
     'core.middleware.RequestTimingMiddleware',
 ]
 
@@ -123,6 +127,19 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
     ),
+    'DEFAULT_THROTTLE_CLASSES': (
+        'rest_framework.throttling.ScopedRateThrottle',
+    ),
+    'DEFAULT_THROTTLE_RATES': {
+        'register': '5/hour',
+        'login': '10/minute',
+        'verify_email': '10/minute',
+        'resend_otp': '3/hour',
+        'password_reset': '5/hour',
+        'password_reset_confirm': '10/hour',
+        'token_refresh': '30/minute',
+        'sms_dispatch': '10/hour',
+    },
 }
 
 # Swagger / OpenAPI Documentation Settings

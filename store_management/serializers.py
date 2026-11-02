@@ -82,6 +82,30 @@ class StoreSerializer(serializers.ModelSerializer):
         return self._save_optimized_media(instance, uploads)
 
 
+class PublicStoreSerializer(serializers.ModelSerializer):
+    logo = MarketplaceImageField(read_only=True)
+    banner = MarketplaceImageField(read_only=True)
+
+    class Meta:
+        model = Store
+        fields = [
+            'id',
+            'name',
+            'slug',
+            'description',
+            'logo',
+            'banner',
+            'average_rating',
+            'total_reviews',
+            'total_orders',
+            'total_products',
+            'status',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+
 class StoreKYCSerializer(serializers.ModelSerializer):
     store = serializers.UUIDField(source='store_id', read_only=True)
     reviewed_by = serializers.UUIDField(source='reviewed_by_id', read_only=True)

@@ -6,6 +6,7 @@ class SendSMSSerializer(serializers.Serializer):
     phone_numbers = serializers.ListField(
         child=serializers.CharField(max_length=30),
         required=False,
+        max_length=20,
         help_text="List of recipient phone numbers (e.g. ['0712345678', '0722000000'])",
     )
     phone_number = serializers.CharField(

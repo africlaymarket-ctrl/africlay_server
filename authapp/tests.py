@@ -1,3 +1,6 @@
+from unittest.mock import patch
+
+from django.core.cache import cache
 from django.test import TestCase
 from django.urls import reverse
 from django.contrib.auth import get_user_model
@@ -5,7 +8,10 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from .models import UserProfile, UserAddress, OTPVerification, OTPType, UserRole, BlacklistedToken
+from .models import (
+    CURRENT_POLICY_VERSIONS, BlacklistedToken, PolicyAcceptance, PolicyCode,
+    UserProfile, UserAddress, OTPVerification, OTPType, UserRole,
+)
 from .utils import generate_access_token, generate_refresh_token
 
 User = get_user_model()
@@ -13,6 +19,7 @@ User = get_user_model()
 
 class AuthTestCase(TestCase):
     def setUp(self):
+        cache.clear()
         self.client = APIClient()
         self.user_email = 'buyer@example.com'
         self.user_password = 'StrongPassword123!'
@@ -74,7 +81,8 @@ class AuthTestCase(TestCase):
         self.assertTrue(admin.is_verified)
         self.assertEqual(admin.role, UserRole.SUPER_ADMIN)
 
-    def test_user_registration(self):
+    @patch('authapp.utils.send_otp_email')
+    def test_user_registration(self, mock_send_otp_email):
         """Test POST /api/auth/register/ creates user, profile, and OTP."""
         url = reverse('authapp:register')
         data = {
@@ -84,20 +92,72 @@ class AuthTestCase(TestCase):
             'first_name': 'Jane',
             'last_name': 'Smith',
             'role': 'buyer',
+            'accepted_policies': [PolicyCode.BUYER_SHIPPING_DELIVERY],
             'phone_number': '+254700000002',
         }
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(response.data['message'], 'Registration successful. Your account is ready.')
+        self.assertEqual(response.data['message'], 'Registration successful. Verify your email before signing in.')
 
         user = User.objects.filter(email='newuser@example.com').first()
         self.assertIsNotNone(user)
-        self.assertTrue(user.is_verified)
+        self.assertFalse(user.is_verified)
         self.assertEqual(user.profile.first_name, 'Jane')
+        acceptance = user.policy_acceptances.get()
+        self.assertEqual(acceptance.policy_code, PolicyCode.BUYER_SHIPPING_DELIVERY)
+        self.assertEqual(acceptance.policy_version, CURRENT_POLICY_VERSIONS[PolicyCode.BUYER_SHIPPING_DELIVERY])
+        self.assertEqual(acceptance.accepted_role, UserRole.BUYER)
 
-        self.assertFalse(
-            OTPVerification.objects.filter(user=user, otp_type=OTPType.EMAIL_VERIFICATION).exists()
+        otp = OTPVerification.objects.get(user=user, otp_type=OTPType.EMAIL_VERIFICATION)
+        raw_code = mock_send_otp_email.call_args.args[1]
+        self.assertNotEqual(otp.otp_code, raw_code)
+        self.assertTrue(otp.matches_code(raw_code))
+
+    def test_public_registration_rejects_privileged_roles(self):
+        url = reverse('authapp:register')
+        for role in (UserRole.ADMIN, UserRole.SUPER_ADMIN):
+            response = self.client.post(url, {
+                'email': f'{role}@example.com',
+                'password': 'NewPassword123!',
+                'password_confirm': 'NewPassword123!',
+                'role': role,
+                'accepted_policies': [PolicyCode.BUYER_SHIPPING_DELIVERY],
+            }, format='json')
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+            self.assertFalse(User.objects.filter(email=f'{role}@example.com').exists())
+
+    def test_registration_requires_exact_policies_for_role(self):
+        url = reverse('authapp:register')
+        base = {
+            'password': 'NewPassword123!',
+            'password_confirm': 'NewPassword123!',
+            'first_name': 'Policy',
+        }
+        cases = [
+            ('missing@example.com', UserRole.BUYER, [], status.HTTP_400_BAD_REQUEST),
+            ('wrong@example.com', UserRole.BUYER, [PolicyCode.SELLER_COMMISSION], status.HTTP_400_BAD_REQUEST),
+            ('seller@example.com', UserRole.SELLER, [PolicyCode.SELLER_PARTNER_TERMS, PolicyCode.SELLER_COMMISSION], status.HTTP_201_CREATED),
+            ('both@example.com', UserRole.BOTH, list(PolicyCode.values), status.HTTP_201_CREATED),
+        ]
+        for email, role, policies, expected_status in cases:
+            response = self.client.post(url, {**base, 'email': email, 'role': role, 'accepted_policies': policies}, format='json')
+            self.assertEqual(response.status_code, expected_status, response.data)
+
+        self.assertEqual(User.objects.get(email='seller@example.com').policy_acceptances.count(), 2)
+        self.assertEqual(User.objects.get(email='both@example.com').policy_acceptances.count(), 3)
+
+    def test_policy_acceptance_is_append_only(self):
+        acceptance = PolicyAcceptance.objects.create(
+            user=self.user,
+            policy_code=PolicyCode.BUYER_SHIPPING_DELIVERY,
+            policy_version=CURRENT_POLICY_VERSIONS[PolicyCode.BUYER_SHIPPING_DELIVERY],
+            accepted_role=UserRole.BUYER,
         )
+        acceptance.policy_version = 'changed'
+        with self.assertRaisesMessage(ValueError, 'append-only'):
+            acceptance.save()
+        with self.assertRaisesMessage(ValueError, 'append-only'):
+            acceptance.delete()
 
     def test_verify_email_otp(self):
         """Test POST /api/auth/verify-email/ validates OTP and activates user."""
@@ -124,6 +184,29 @@ class AuthTestCase(TestCase):
         otp.refresh_from_db()
         self.assertTrue(otp.is_used)
 
+    def test_verification_code_locks_after_five_failed_attempts(self):
+        user = User.objects.create_user(
+            email='locked-otp@example.com',
+            password='Password123!',
+            is_verified=False,
+        )
+        otp = OTPVerification.objects.create(
+            user=user,
+            otp_code='123456',
+            otp_type=OTPType.EMAIL_VERIFICATION,
+            expires_at=timezone.now() + timezone.timedelta(minutes=15),
+        )
+        url = reverse('authapp:verify-email')
+        for _ in range(5):
+            response = self.client.post(url, {'email': user.email, 'otp_code': '000000'}, format='json')
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        otp.refresh_from_db()
+        self.assertEqual(otp.failed_attempts, OTPVerification.MAX_FAILED_ATTEMPTS)
+        self.assertTrue(otp.is_used)
+        valid_response = self.client.post(url, {'email': user.email, 'otp_code': '123456'}, format='json')
+        self.assertEqual(valid_response.status_code, status.HTTP_400_BAD_REQUEST)
+
     def test_resend_otp(self):
         """Test POST /api/auth/resend-otp/ dispatches new code."""
         unverified_user = User.objects.create_user(
@@ -146,6 +229,21 @@ class AuthTestCase(TestCase):
         self.assertIn('access', response.data['tokens'])
         self.assertIn('refresh', response.data['tokens'])
 
+    def test_unverified_user_login_returns_no_tokens(self):
+        user = User.objects.create_user(
+            email='login-unverified@example.com',
+            password='Password123!',
+            is_verified=False,
+        )
+        response = self.client.post(
+            reverse('authapp:login'),
+            {'email': user.email, 'password': 'Password123!'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['verification_required'])
+        self.assertNotIn('tokens', response.data)
+
     def test_token_refresh(self):
         """Test POST /api/auth/token/refresh/ issues new token pair."""
         refresh_token = generate_refresh_token(self.user)
@@ -165,12 +263,18 @@ class AuthTestCase(TestCase):
         response = self.client.post(url, {'refresh': refresh_token}, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.auth_version, 1)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {access_token}')
+        self.assertEqual(self.client.get(reverse('authapp:user-me')).status_code, status.HTTP_401_UNAUTHORIZED)
+
         # Attempting to refresh with the blacklisted token should now fail
         refresh_url = reverse('authapp:token-refresh')
         refresh_resp = self.client.post(refresh_url, {'refresh': refresh_token}, format='json')
         self.assertEqual(refresh_resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
-    def test_password_reset_flow(self):
+    @patch('authapp.utils.send_otp_email')
+    def test_password_reset_flow(self, mock_send_otp_email):
         """Test password reset request and confirmation with OTP."""
         # 1. Request reset
         req_url = reverse('authapp:password-reset-request')
@@ -182,9 +286,10 @@ class AuthTestCase(TestCase):
 
         # 2. Confirm reset
         confirm_url = reverse('authapp:password-reset-confirm')
+        raw_code = mock_send_otp_email.call_args.args[1]
         confirm_data = {
             'email': self.user_email,
-            'otp_code': otp_record.otp_code,
+            'otp_code': raw_code,
             'new_password': 'BrandNewPassword123!',
             'new_password_confirm': 'BrandNewPassword123!',
         }
@@ -193,6 +298,15 @@ class AuthTestCase(TestCase):
 
         self.user.refresh_from_db()
         self.assertTrue(self.user.check_password('BrandNewPassword123!'))
+        self.assertEqual(self.user.auth_version, 1)
+
+    def test_password_reset_request_does_not_reveal_account_existence(self):
+        url = reverse('authapp:password-reset-request')
+        known = self.client.post(url, {'email': self.user_email}, format='json')
+        unknown = self.client.post(url, {'email': 'missing@example.com'}, format='json')
+        self.assertEqual(known.status_code, status.HTTP_200_OK)
+        self.assertEqual(unknown.status_code, status.HTTP_200_OK)
+        self.assertEqual(known.data, unknown.data)
 
     def test_change_password(self):
         """Test POST /api/auth/change-password/ for authenticated user."""
@@ -210,6 +324,8 @@ class AuthTestCase(TestCase):
 
         self.user.refresh_from_db()
         self.assertTrue(self.user.check_password('UpdatedPassword123!'))
+        self.assertEqual(self.user.auth_version, 1)
+        self.assertEqual(self.client.get(reverse('authapp:user-me')).status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_user_me_profile_retrieval_and_update(self):
         """Test GET and PATCH /api/auth/me/."""

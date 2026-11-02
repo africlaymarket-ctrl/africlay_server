@@ -1,9 +1,9 @@
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 
+from authapp.permissions import IsSuperAdmin
 from .serializers import SendSMSSerializer, SendSMSResponseSerializer
 from .utils import SendSMS
 
@@ -23,14 +23,14 @@ from .utils import SendSMS
             description='Validation error or SMS sending failure',
         ),
     },
-    auth=[],
 )
 class SendSMSView(APIView):
     """
     API View to test and dispatch SMS messages.
     Can be used directly or called by internal services.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsSuperAdmin]
+    throttle_scope = 'sms_dispatch'
 
     def post(self, request, *args, **kwargs):
         serializer = SendSMSSerializer(data=request.data)

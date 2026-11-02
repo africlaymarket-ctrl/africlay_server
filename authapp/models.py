@@ -1,4 +1,7 @@
+import secrets
 import uuid
+
+from django.contrib.auth.hashers import check_password, identify_hasher, make_password
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
 from django.utils import timezone
@@ -12,6 +15,29 @@ class UserRole(models.TextChoices):
     BOTH = 'both', 'Both'
     ADMIN = 'admin', 'Admin'
     SUPER_ADMIN = 'super_admin', 'Super Admin'
+
+
+class PolicyCode(models.TextChoices):
+    BUYER_SHIPPING_DELIVERY = 'buyer_shipping_delivery', 'Buyer shipping and delivery'
+    SELLER_PARTNER_TERMS = 'seller_partner_terms', 'Seller partner general terms'
+    SELLER_COMMISSION = 'seller_commission', 'Seller commission'
+
+
+CURRENT_POLICY_VERSIONS = {
+    PolicyCode.BUYER_SHIPPING_DELIVERY: 'policy-library-v1',
+    PolicyCode.SELLER_PARTNER_TERMS: '1.0',
+    PolicyCode.SELLER_COMMISSION: 'policy-library-v1',
+}
+
+
+def required_policy_codes(role):
+    if role == UserRole.BUYER:
+        return {PolicyCode.BUYER_SHIPPING_DELIVERY}
+    if role == UserRole.SELLER:
+        return {PolicyCode.SELLER_PARTNER_TERMS, PolicyCode.SELLER_COMMISSION}
+    if role == UserRole.BOTH:
+        return set(PolicyCode.values)
+    return set()
 
 
 class StaffRole(models.TextChoices):
@@ -115,6 +141,35 @@ class User(TimestampedModel, AbstractBaseUser, PermissionsMixin):
 
     def has_staff_role(self, role):
         return self.is_super_admin or self.staff_role_assignments.filter(role=role).exists()
+
+
+class PolicyAcceptance(TimestampedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='policy_acceptances')
+    policy_code = models.CharField(max_length=50, choices=PolicyCode.choices)
+    policy_version = models.CharField(max_length=50)
+    accepted_role = models.CharField(max_length=20, choices=UserRole.choices)
+    acceptance_source = models.CharField(max_length=30, default='registration')
+
+    class Meta:
+        ordering = ['-created_at', 'policy_code']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'policy_code', 'policy_version'],
+                name='unique_user_policy_version_acceptance',
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk and PolicyAcceptance.objects.filter(pk=self.pk).exists():
+            raise ValueError('Policy acceptance records are append-only.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValueError('Policy acceptance records are append-only.')
+
+    def __str__(self):
+        return f'{self.user.email}: {self.policy_code} {self.policy_version}'
 
 
 class UserStaffRole(TimestampedModel):
@@ -265,12 +320,15 @@ class OTPType(models.TextChoices):
 
 
 class OTPVerification(TimestampedModel):
+    MAX_FAILED_ATTEMPTS = 5
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='otp_codes')
-    otp_code = models.CharField(max_length=6)
+    otp_code = models.CharField(max_length=128)
     otp_type = models.CharField(max_length=30, choices=OTPType.choices)
     expires_at = models.DateTimeField()
     is_used = models.BooleanField(default=False)
+    failed_attempts = models.PositiveSmallIntegerField(default=0)
 
     class Meta:
         verbose_name = 'OTP Verification'
@@ -278,10 +336,34 @@ class OTPVerification(TimestampedModel):
         ordering = ['-created_at']
 
     def __str__(self):
-        return f"{self.user.email} - {self.otp_type} - {self.otp_code}"
+        return f"{self.user.email} - {self.otp_type}"
 
     def is_valid(self):
-        return not self.is_used and timezone.now() <= self.expires_at
+        return (
+            not self.is_used
+            and self.failed_attempts < self.MAX_FAILED_ATTEMPTS
+            and timezone.now() <= self.expires_at
+        )
+
+    def set_code(self, raw_code):
+        self.otp_code = make_password(str(raw_code))
+
+    def matches_code(self, raw_code):
+        try:
+            identify_hasher(self.otp_code)
+        except ValueError:
+            # Already-issued plaintext codes may finish their short validity
+            # window after deployment. Every newly saved code is hashed.
+            return secrets.compare_digest(self.otp_code, str(raw_code))
+        return check_password(str(raw_code), self.otp_code)
+
+    def save(self, *args, **kwargs):
+        if self.otp_code:
+            try:
+                identify_hasher(self.otp_code)
+            except ValueError:
+                self.set_code(self.otp_code)
+        return super().save(*args, **kwargs)
 
 
 class BlacklistedToken(TimestampedModel):

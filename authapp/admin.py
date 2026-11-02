@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from .models import (
-    AdminAuditLog, BlacklistedToken, DashboardAccessRequest, OTPVerification,
+    AdminAuditLog, BlacklistedToken, DashboardAccessRequest, OTPVerification, PolicyAcceptance,
     User, UserAddress, UserProfile, UserStaffRole,
 )
 
@@ -71,6 +71,23 @@ class BlacklistedTokenAdmin(admin.ModelAdmin):
 
 admin.site.register(UserStaffRole)
 admin.site.register(DashboardAccessRequest)
+
+
+@admin.register(PolicyAcceptance)
+class PolicyAcceptanceAdmin(admin.ModelAdmin):
+    list_display = ('user', 'policy_code', 'policy_version', 'accepted_role', 'acceptance_source', 'created_at')
+    list_filter = ('policy_code', 'policy_version', 'accepted_role', 'acceptance_source')
+    search_fields = ('user__email', 'policy_code', 'policy_version')
+    readonly_fields = [field.name for field in PolicyAcceptance._meta.fields]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(AdminAuditLog)

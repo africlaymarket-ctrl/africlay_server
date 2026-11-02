@@ -47,6 +47,13 @@ RUN test -x /opt/venv/bin/gunicorn
 # Copy application code
 COPY . /app
 
+# The application does not need root privileges at runtime. Keeping the build
+# stage privileged is normal; only the final network-facing process is dropped.
+RUN groupadd --system africlay && useradd --system --gid africlay --home /app --shell /usr/sbin/nologin africlay \
+    && chown -R africlay:africlay /app
+
+USER africlay
+
 # Render sets PORT at runtime. Keep 8000 as a fallback for local Docker use.
 EXPOSE 8000
 

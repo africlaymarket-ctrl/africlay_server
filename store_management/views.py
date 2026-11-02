@@ -13,13 +13,18 @@ from authapp.permissions import IsKYCReviewer, IsSeller, IsVerifiedUser
 from core.pagination import CatalogPagination
 
 from .models import Store, StoreKYC, StoreKYCStatus, StoreStatus
-from .serializers import StoreKYCReviewSerializer, StoreKYCSerializer, StoreSerializer
+from .serializers import PublicStoreSerializer, StoreKYCReviewSerializer, StoreKYCSerializer, StoreSerializer
 from .operations import StoreKYCQueueSerializer
 
 
 class StoreListCreateView(generics.ListCreateAPIView):
     serializer_class = StoreSerializer
     pagination_class = CatalogPagination
+
+    def get_serializer_class(self):
+        if self.request.method in permissions.SAFE_METHODS:
+            return PublicStoreSerializer
+        return StoreSerializer
 
     def get_permissions(self):
         if self.request.method == 'POST':
@@ -43,6 +48,11 @@ class StoreDetailView(generics.RetrieveUpdateAPIView):
     serializer_class = StoreSerializer
     lookup_field = 'slug'
 
+    def get_serializer_class(self):
+        if self.request.method in permissions.SAFE_METHODS:
+            return PublicStoreSerializer
+        return StoreSerializer
+
     def get_queryset(self):
         stores = Store.objects.select_related('owner')
         if self.request.method == 'GET':
@@ -59,6 +69,14 @@ class StoreDetailView(generics.RetrieveUpdateAPIView):
         if serializer.instance.owner_id != self.request.user.id and not is_explicit_admin:
             raise PermissionDenied('You do not own this store.')
         serializer.save()
+
+
+class StoreMineView(generics.RetrieveAPIView):
+    serializer_class = StoreSerializer
+    permission_classes = [IsSeller, IsVerifiedUser]
+
+    def get_object(self):
+        return get_object_or_404(Store.objects.select_related('owner'), owner=self.request.user)
 
 
 class StoreKYCDetailView(generics.RetrieveAPIView):

@@ -1,3 +1,5 @@
+import logging
+
 from rest_framework import status, generics
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -6,7 +8,7 @@ from django.utils import timezone
 from django.contrib.auth import get_user_model
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiResponse
 
-from .models import OTPVerification, OTPType, UserAddress
+from .models import OTPType, UserAddress
 from .permissions import IsAuthenticated, IsOwner
 from .serializers import (
     UserRegistrationSerializer,
@@ -30,18 +32,18 @@ from .utils import (
     generate_refresh_token,
     refresh_access_token,
     blacklist_token,
-    generate_otp_code,
-    send_otp_email,
+    issue_otp,
 )
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 # Registration & Verification Views
 
 @extend_schema(
     tags=['Authentication'],
     summary='Register a new user account',
-    description='Creates a new user with the specified role (buyer/seller/both). The account is available immediately.',
+    description='Creates a buyer, seller, or combined account and sends an email verification code.',
     request=UserRegistrationSerializer,
     responses={
         201: OpenApiResponse(
@@ -55,16 +57,27 @@ User = get_user_model()
 class RegisterView(generics.CreateAPIView):
     permission_classes = [AllowAny]
     serializer_class = UserRegistrationSerializer
+    throttle_scope = 'register'
 
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
 
+        delivery = 'sent'
+        try:
+            issue_otp(user, OTPType.EMAIL_VERIFICATION)
+        except Exception:
+            # Keep the account unverified. The user can safely retry delivery
+            # without creating a duplicate account.
+            logger.exception('Unable to deliver registration verification email for user %s', user.pk)
+            delivery = 'failed'
+
         return Response(
             {
-                'message': 'Registration successful. Your account is ready.',
+                'message': 'Registration successful. Verify your email before signing in.',
                 'user': UserSummarySerializer(user).data,
+                'verification_delivery': delivery,
             },
             status=status.HTTP_201_CREATED,
         )
@@ -84,20 +97,15 @@ class RegisterView(generics.CreateAPIView):
 class VerifyEmailView(APIView):
     permission_classes = [AllowAny]
     serializer_class = VerifyEmailSerializer
+    throttle_scope = 'verify_email'
 
     def post(self, request, *args, **kwargs):
         serializer = self.serializer_class(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         user = serializer.validated_data['user']
-        otp_record = serializer.validated_data['otp_record']
-
-        # Mark OTP as used and user as verified
-        otp_record.is_used = True
-        otp_record.save()
-
         user.is_verified = True
-        user.save()
+        user.save(update_fields=['is_verified', 'updated_at'])
 
         tokens = {
             'access': generate_access_token(user),
@@ -128,29 +136,26 @@ class VerifyEmailView(APIView):
 class ResendOTPView(APIView):
     permission_classes = [AllowAny]
     serializer_class = ResendOTPSerializer
+    throttle_scope = 'resend_otp'
 
     def post(self, request, *args, **kwargs):
         serializer = self.serializer_class(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        user = serializer.validated_data['user']
+        email = serializer.validated_data['email']
         otp_type = serializer.validated_data.get('otp_type', OTPType.EMAIL_VERIFICATION)
-
-        # Invalidate old unused OTPs
-        OTPVerification.objects.filter(user=user, otp_type=otp_type, is_used=False).update(is_used=True)
-
-        # Generate fresh OTP
-        otp_code = generate_otp_code()
-        OTPVerification.objects.create(
-            user=user,
-            otp_code=otp_code,
-            otp_type=otp_type,
-            expires_at=timezone.now() + timezone.timedelta(minutes=15),
+        user = User.objects.filter(email__iexact=email, is_active=True).first()
+        should_send = user and not (
+            otp_type == OTPType.EMAIL_VERIFICATION and user.is_verified
         )
-        send_otp_email(user, otp_code, otp_type)
+        if should_send:
+            try:
+                issue_otp(user, otp_type)
+            except Exception:
+                logger.exception('Unable to resend OTP for user %s', user.pk)
 
         return Response(
-            {'message': 'A new verification code has been sent to your email address.'},
+            {'message': 'If the account is eligible, a new verification code has been sent.'},
             status=status.HTTP_200_OK,
         )
 
@@ -171,12 +176,23 @@ class ResendOTPView(APIView):
 class LoginView(APIView):
     permission_classes = [AllowAny]
     serializer_class = UserLoginSerializer
+    throttle_scope = 'login'
 
     def post(self, request, *args, **kwargs):
         serializer = self.serializer_class(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         user = serializer.validated_data['user']
+        if not user.is_verified:
+            return Response(
+                {
+                    'message': 'Verify your email before signing in.',
+                    'verification_required': True,
+                    'user': UserSummarySerializer(user).data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
         user.last_login = timezone.now()
         user.save(update_fields=['last_login'])
 
@@ -209,6 +225,7 @@ class LoginView(APIView):
 class TokenRefreshView(APIView):
     permission_classes = [AllowAny]
     serializer_class = TokenRefreshSerializer
+    throttle_scope = 'token_refresh'
 
     def post(self, request, *args, **kwargs):
         serializer = self.serializer_class(data=request.data)
@@ -240,6 +257,8 @@ class LogoutView(APIView):
 
         refresh_token = serializer.validated_data['refresh']
         blacklist_token(refresh_token)
+        request.user.auth_version += 1
+        request.user.save(update_fields=['auth_version', 'updated_at'])
 
         return Response(
             {'message': 'Successfully logged out and session revoked.'},
@@ -262,30 +281,20 @@ class LogoutView(APIView):
 class PasswordResetRequestView(APIView):
     permission_classes = [AllowAny]
     serializer_class = PasswordResetRequestSerializer
+    throttle_scope = 'password_reset'
 
     def post(self, request, *args, **kwargs):
         serializer = self.serializer_class(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         email = serializer.validated_data['email']
-        user = User.objects.filter(email__iexact=email).first()
+        user = User.objects.filter(email__iexact=email, is_active=True).first()
 
         if user:
-            # Invalidate old reset OTPs
-            OTPVerification.objects.filter(
-                user=user,
-                otp_type=OTPType.PASSWORD_RESET,
-                is_used=False,
-            ).update(is_used=True)
-
-            otp_code = generate_otp_code()
-            OTPVerification.objects.create(
-                user=user,
-                otp_code=otp_code,
-                otp_type=OTPType.PASSWORD_RESET,
-                expires_at=timezone.now() + timezone.timedelta(minutes=15),
-            )
-            send_otp_email(user, otp_code, OTPType.PASSWORD_RESET)
+            try:
+                issue_otp(user, OTPType.PASSWORD_RESET)
+            except Exception:
+                logger.exception('Unable to deliver password reset email for user %s', user.pk)
 
         return Response(
             {'message': 'If an account with this email exists, a password reset code has been sent.'},
@@ -307,22 +316,18 @@ class PasswordResetRequestView(APIView):
 class PasswordResetConfirmView(APIView):
     permission_classes = [AllowAny]
     serializer_class = PasswordResetConfirmSerializer
+    throttle_scope = 'password_reset_confirm'
 
     def post(self, request, *args, **kwargs):
         serializer = self.serializer_class(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         user = serializer.validated_data['user']
-        otp_record = serializer.validated_data['otp_record']
         new_password = serializer.validated_data['new_password']
 
-        # Update password
         user.set_password(new_password)
-        user.save()
-
-        # Mark OTP as used
-        otp_record.is_used = True
-        otp_record.save()
+        user.auth_version += 1
+        user.save(update_fields=['password', 'auth_version', 'updated_at'])
 
         return Response(
             {'message': 'Password has been successfully reset. You can now log in with your new password.'},
@@ -351,7 +356,8 @@ class ChangePasswordView(APIView):
         user = request.user
         new_password = serializer.validated_data['new_password']
         user.set_password(new_password)
-        user.save()
+        user.auth_version += 1
+        user.save(update_fields=['password', 'auth_version', 'updated_at'])
 
         return Response(
             {'message': 'Password changed successfully.'},

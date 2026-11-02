@@ -163,6 +163,23 @@ class StoreApiTests(TestCase):
 
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
 		self.assertEqual(response.data['name'], self.store_data['name'])
+		for private_field in ('owner', 'legal_name', 'business_type', 'phone_number', 'address', 'city', 'country', 'country_code'):
+			self.assertNotIn(private_field, response.data)
+
+	def test_verified_seller_can_retrieve_private_store_details(self):
+		self.create_store()
+		response = self.client.get(reverse('store_management:store-mine'))
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(response.data['owner'], str(self.seller.id))
+		self.assertEqual(response.data['city'], 'Nairobi')
+
+	def test_anonymous_user_cannot_retrieve_private_store_details(self):
+		self.create_store()
+		self.client.credentials()
+		response = self.client.get(reverse('store_management:store-mine'))
+
+		self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
 	def create_store(self, user=None, slug=None):
 		self.authenticate_as(user or self.seller)

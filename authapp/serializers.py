@@ -1,7 +1,11 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model, authenticate
 from django.contrib.auth.password_validation import validate_password
-from .models import UserProfile, UserAddress, OTPVerification, OTPType, UserRole
+from django.db import transaction
+from .models import (
+    CURRENT_POLICY_VERSIONS, PolicyAcceptance, PolicyCode, UserProfile,
+    UserAddress, OTPVerification, OTPType, UserRole, required_policy_codes,
+)
 from .utils import (
     generate_access_token,
     generate_refresh_token,
@@ -10,6 +14,44 @@ from .utils import (
 )
 
 User = get_user_model()
+
+PUBLIC_REGISTRATION_ROLE_CHOICES = [
+    (UserRole.BUYER, UserRole.BUYER.label),
+    (UserRole.SELLER, UserRole.SELLER.label),
+    (UserRole.BOTH, UserRole.BOTH.label),
+]
+
+
+def _consume_otp(user, otp_type, raw_code):
+    """Atomically consume the newest valid OTP and count failed guesses."""
+    error = None
+    consumed = None
+    with transaction.atomic():
+        otp_record = (
+            OTPVerification.objects.select_for_update()
+            .filter(user=user, otp_type=otp_type, is_used=False)
+            .order_by('-created_at')
+            .first()
+        )
+        if not otp_record or not otp_record.is_valid():
+            if otp_record and not otp_record.is_used:
+                otp_record.is_used = True
+                otp_record.save(update_fields=['is_used', 'updated_at'])
+            error = 'Invalid or expired verification code.'
+        elif not otp_record.matches_code(raw_code):
+            otp_record.failed_attempts += 1
+            if otp_record.failed_attempts >= OTPVerification.MAX_FAILED_ATTEMPTS:
+                otp_record.is_used = True
+            otp_record.save(update_fields=['failed_attempts', 'is_used', 'updated_at'])
+            error = 'Invalid or expired verification code.'
+        else:
+            otp_record.is_used = True
+            otp_record.save(update_fields=['is_used', 'updated_at'])
+            consumed = otp_record
+
+    if error:
+        raise serializers.ValidationError({'otp_code': error})
+    return consumed
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
@@ -100,7 +142,12 @@ class UserRegistrationSerializer(serializers.Serializer):
     first_name = serializers.CharField(required=False, allow_blank=True, default='')
     last_name = serializers.CharField(required=False, allow_blank=True, default='')
     phone_number = serializers.CharField(required=False, allow_blank=True, allow_null=True)
-    role = serializers.ChoiceField(choices=UserRole.choices, default=UserRole.BUYER)
+    role = serializers.ChoiceField(choices=PUBLIC_REGISTRATION_ROLE_CHOICES, default=UserRole.BUYER)
+    accepted_policies = serializers.ListField(
+        child=serializers.ChoiceField(choices=PolicyCode.choices),
+        allow_empty=False,
+        write_only=True,
+    )
 
     def validate_email(self, value):
         normalized_email = value.lower().strip()
@@ -122,8 +169,21 @@ class UserRegistrationSerializer(serializers.Serializer):
 
         # Run Django password validators
         validate_password(attrs['password'])
+        role = attrs.get('role', UserRole.BUYER)
+        accepted = set(attrs.get('accepted_policies', []))
+        required = required_policy_codes(role)
+        if accepted != required:
+            missing = sorted(required - accepted)
+            unexpected = sorted(accepted - required)
+            details = []
+            if missing:
+                details.append(f'Missing required policies: {", ".join(missing)}.')
+            if unexpected:
+                details.append(f'Policies not applicable to this role: {", ".join(unexpected)}.')
+            raise serializers.ValidationError({'accepted_policies': ' '.join(details)})
         return attrs
 
+    @transaction.atomic
     def create(self, validated_data):
         email = validated_data['email']
         password = validated_data['password']
@@ -131,13 +191,14 @@ class UserRegistrationSerializer(serializers.Serializer):
         phone_number = validated_data.get('phone_number')
         first_name = validated_data.get('first_name', '')
         last_name = validated_data.get('last_name', '')
+        accepted_policies = validated_data.pop('accepted_policies')
 
         user = User.objects.create_user(
             email=email,
             password=password,
             role=role,
             phone_number=phone_number,
-            is_verified=True,
+            is_verified=False,
         )
 
         # Update profile with names
@@ -145,6 +206,16 @@ class UserRegistrationSerializer(serializers.Serializer):
         profile.first_name = first_name
         profile.last_name = last_name
         profile.save()
+
+        PolicyAcceptance.objects.bulk_create([
+            PolicyAcceptance(
+                user=user,
+                policy_code=policy_code,
+                policy_version=CURRENT_POLICY_VERSIONS[policy_code],
+                accepted_role=role,
+            )
+            for policy_code in sorted(accepted_policies)
+        ])
 
         return user
 
@@ -164,18 +235,7 @@ class VerifyEmailSerializer(serializers.Serializer):
         if user.is_verified:
             raise serializers.ValidationError({'email': 'Email is already verified.'})
 
-        otp_record = OTPVerification.objects.filter(
-            user=user,
-            otp_code=otp_code,
-            otp_type=OTPType.EMAIL_VERIFICATION,
-            is_used=False,
-        ).first()
-
-        if not otp_record:
-            raise serializers.ValidationError({'otp_code': 'Invalid verification code.'})
-
-        if not otp_record.is_valid():
-            raise serializers.ValidationError({'otp_code': 'Verification code has expired.'})
+        otp_record = _consume_otp(user, OTPType.EMAIL_VERIFICATION, otp_code)
 
         attrs['user'] = user
         attrs['otp_record'] = otp_record
@@ -187,16 +247,7 @@ class ResendOTPSerializer(serializers.Serializer):
     otp_type = serializers.ChoiceField(choices=OTPType.choices, default=OTPType.EMAIL_VERIFICATION)
 
     def validate(self, attrs):
-        email = attrs.get('email').lower().strip()
-        user = User.objects.filter(email__iexact=email).first()
-        if not user:
-            raise serializers.ValidationError({'email': 'User not found.'})
-
-        otp_type = attrs.get('otp_type')
-        if otp_type == OTPType.EMAIL_VERIFICATION and user.is_verified:
-            raise serializers.ValidationError({'email': 'Email is already verified.'})
-
-        attrs['user'] = user
+        attrs['email'] = attrs.get('email').lower().strip()
         return attrs
 
 
@@ -236,13 +287,7 @@ class PasswordResetRequestSerializer(serializers.Serializer):
     email = serializers.EmailField()
 
     def validate_email(self, value):
-        email = value.lower().strip()
-        user = User.objects.filter(email__iexact=email).first()
-        if not user:
-            raise serializers.ValidationError('User with this email does not exist.')
-        if not user.is_active:
-            raise serializers.ValidationError('User account is inactive.')
-        return email
+        return value.lower().strip()
 
 
 class PasswordResetVerifySerializer(serializers.Serializer):
@@ -257,14 +302,17 @@ class PasswordResetVerifySerializer(serializers.Serializer):
         if not user:
             raise serializers.ValidationError({'email': 'User not found.'})
 
-        otp_record = OTPVerification.objects.filter(
-            user=user,
-            otp_code=otp_code,
-            otp_type=OTPType.PASSWORD_RESET,
-            is_used=False,
-        ).first()
+        otp_record = (
+            OTPVerification.objects.filter(
+                user=user,
+                otp_type=OTPType.PASSWORD_RESET,
+                is_used=False,
+            )
+            .order_by('-created_at')
+            .first()
+        )
 
-        if not otp_record or not otp_record.is_valid():
+        if not otp_record or not otp_record.is_valid() or not otp_record.matches_code(otp_code):
             raise serializers.ValidationError({'otp_code': 'Invalid or expired password reset code.'})
 
         attrs['user'] = user
@@ -291,15 +339,7 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
         if not user:
             raise serializers.ValidationError({'email': 'User not found.'})
 
-        otp_record = OTPVerification.objects.filter(
-            user=user,
-            otp_code=otp_code,
-            otp_type=OTPType.PASSWORD_RESET,
-            is_used=False,
-        ).first()
-
-        if not otp_record or not otp_record.is_valid():
-            raise serializers.ValidationError({'otp_code': 'Invalid or expired password reset code.'})
+        otp_record = _consume_otp(user, OTPType.PASSWORD_RESET, otp_code)
 
         attrs['user'] = user
         attrs['otp_record'] = otp_record
