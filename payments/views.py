@@ -474,7 +474,9 @@ class AdminPaymentListView(generics.ListAPIView):
     def get_queryset(self):
         queryset = Payment.objects.select_related('order', 'order__buyer')
         payment_status = self.request.query_params.get('status', '').strip()
-        if payment_status in PaymentStatus.values:
+        if payment_status == 'awaiting_confirmation':
+            queryset = queryset.filter(status__in=[PaymentStatus.INITIATED, PaymentStatus.PENDING])
+        elif payment_status in PaymentStatus.values:
             queryset = queryset.filter(status=payment_status)
         search = self.request.query_params.get('search', '').strip()
         if search:
@@ -532,6 +534,7 @@ class AdminFinanceSummaryView(generics.GenericAPIView):
         ledger_totals = period(LedgerEntry.objects.all()).aggregate(
             commission=Sum('amount', filter=Q(entry_type=LedgerEntryType.COMMISSION_EARNED)),
             seller_released=Sum('amount', filter=Q(entry_type=LedgerEntryType.SELLER_PROCEEDS_RELEASE)),
+            refunds_recorded=Sum('amount', filter=Q(entry_type=LedgerEntryType.REFUND_COMPLETED)),
             customer_payments=Sum('amount', filter=Q(entry_type__in=[
                 LedgerEntryType.CUSTOMER_PAYMENT, LedgerEntryType.DELIVERY_FEE,
             ])),
@@ -545,6 +548,7 @@ class AdminFinanceSummaryView(generics.GenericAPIView):
             'wallet_reserved': wallet_totals['reserved'] or zero,
             'commission_earned': ledger_totals['commission'] or zero,
             'seller_proceeds_released': ledger_totals['seller_released'] or zero,
+            'refunds_recorded': ledger_totals['refunds_recorded'] or zero,
             'customer_payments': ledger_totals['customer_payments'] or zero,
             'payouts_pending': pending_payouts['pending'] or zero,
             'payouts_completed': payout_totals['completed'] or zero,

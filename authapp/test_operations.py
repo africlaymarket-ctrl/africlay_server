@@ -327,14 +327,26 @@ class OperationsPermissionTests(APITestCase):
             failure_code='provider_rejected',
             failure_message='Payment was declined.',
         )
+        LedgerEntry.objects.create(
+            order=self.order, user=self.regular, entry_type=LedgerEntryType.REFUND_COMPLETED,
+            amount=Decimal('25.00'), reference='refund:test-order',
+        )
         finance_summary = self.client.get(reverse('payments:admin-finance-summary'))
         self.assertEqual(finance_summary.status_code, status.HTTP_200_OK, finance_summary.data)
         self.assertIn('failed_payments', finance_summary.data)
         self.assertIn('reconciliation_over_24h', finance_summary.data)
         self.assertIn('customer_payments', finance_summary.data)
+        self.assertEqual(finance_summary.data['refunds_recorded'], Decimal('25.00'))
         payment_queue = self.client.get(reverse('payments:admin-payment-list'), {'status': 'failed'})
         self.assertEqual(payment_queue.status_code, status.HTTP_200_OK, payment_queue.data)
         self.assertEqual(payment_queue.data['results'][0]['failure_code'], 'provider_rejected')
+
+        Payment.objects.create(order=self.order, status=PaymentStatus.INITIATED, amount=Decimal('50.00'), phone_number='254700000000')
+        Payment.objects.create(order=self.order, status=PaymentStatus.PENDING, amount=Decimal('75.00'), phone_number='254700000000')
+        awaiting = self.client.get(reverse('payments:admin-payment-list'), {'status': 'awaiting_confirmation'})
+        self.assertEqual(awaiting.status_code, status.HTTP_200_OK, awaiting.data)
+        self.assertEqual(awaiting.data['count'], 2)
+        self.assertEqual({item['status'] for item in awaiting.data['results']}, {'initiated', 'pending'})
 
         self.authenticate(self.sales)
         self.assertEqual(
