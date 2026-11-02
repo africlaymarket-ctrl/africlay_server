@@ -138,6 +138,15 @@ class PaymentAttemptSerializer(serializers.ModelSerializer):
         return f'{attempt.phone_number[:5]}***{attempt.phone_number[-3:]}'
 
 
+class AdminPaymentAttemptSerializer(PaymentAttemptSerializer):
+    account_email = serializers.EmailField(source='user.email', read_only=True)
+
+    class Meta(PaymentAttemptSerializer.Meta):
+        fields = PaymentAttemptSerializer.Meta.fields + [
+            'account_email', 'updated_at',
+        ]
+
+
 class PaymentInitiateSerializer(serializers.Serializer):
     order_id = serializers.UUIDField()
     phone_number = serializers.CharField(max_length=20)

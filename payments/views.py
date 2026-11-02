@@ -8,7 +8,8 @@ from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
-from django.db.models import Q, Sum
+from django.db.models import Case, Count, IntegerField, Q, Sum, Value, When
+from django.db.models.functions import TruncDate
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -40,6 +41,7 @@ from .models import (
     WalletTransaction,
 )
 from .serializers import (
+    AdminPaymentAttemptSerializer,
     AdminPaymentSerializer,
     AdminPayoutSerializer,
     FinanceTransactionSerializer,
@@ -454,7 +456,11 @@ class AdminPayoutListView(generics.ListAPIView):
             'wallet__user', 'wallet__user__store', 'payout_account', 'resolved_by',
         )
         payout_status = self.request.query_params.get('status', '').strip()
-        if payout_status in PayoutStatus.values:
+        if payout_status == 'active':
+            queryset = queryset.filter(status__in=[
+                PayoutStatus.REQUESTED, PayoutStatus.PROCESSING, PayoutStatus.UNKNOWN,
+            ])
+        elif payout_status in PayoutStatus.values:
             queryset = queryset.filter(status=payout_status)
         search = self.request.query_params.get('search', '').strip()
         if search:
@@ -463,6 +469,23 @@ class AdminPayoutListView(generics.ListAPIView):
                 | Q(wallet__user__store__name__icontains=search)
                 | Q(transaction_receipt__icontains=search),
             )
+        date_field = 'processed_at' if payout_status == PayoutStatus.SUCCEEDED and self.request.query_params.get('date_basis') == 'processed' else 'created_at'
+        date_from = parse_date(self.request.query_params.get('date_from', '').strip())
+        if date_from:
+            queryset = queryset.filter(**{f'{date_field}__date__gte': date_from})
+        date_to = parse_date(self.request.query_params.get('date_to', '').strip())
+        if date_to:
+            queryset = queryset.filter(**{f'{date_field}__date__lte': date_to})
+        if payout_status == 'active':
+            return queryset.annotate(
+                queue_priority=Case(
+                    When(status=PayoutStatus.UNKNOWN, then=Value(0)),
+                    When(status=PayoutStatus.PROCESSING, then=Value(1)),
+                    default=Value(2), output_field=IntegerField(),
+                ),
+            ).order_by('queue_priority', 'created_at')
+        if payout_status == PayoutStatus.UNKNOWN:
+            return queryset.order_by('created_at')
         return queryset
 
 
@@ -478,6 +501,8 @@ class AdminPaymentListView(generics.ListAPIView):
             queryset = queryset.filter(status__in=[PaymentStatus.INITIATED, PaymentStatus.PENDING])
         elif payment_status in PaymentStatus.values:
             queryset = queryset.filter(status=payment_status)
+        if self.request.query_params.get('provider') == 'mpesa':
+            queryset = queryset.filter(provider='mpesa')
         search = self.request.query_params.get('search', '').strip()
         if search:
             query = (
@@ -491,12 +516,40 @@ class AdminPaymentListView(generics.ListAPIView):
             except ValueError:
                 pass
             queryset = queryset.filter(query)
+        date_field = 'completed_at' if payment_status == PaymentStatus.SUCCEEDED and self.request.query_params.get('date_basis') == 'completed' else 'created_at'
         date_from = parse_date(self.request.query_params.get('date_from', '').strip())
         if date_from:
-            queryset = queryset.filter(created_at__date__gte=date_from)
+            queryset = queryset.filter(**{f'{date_field}__date__gte': date_from})
         date_to = parse_date(self.request.query_params.get('date_to', '').strip())
         if date_to:
-            queryset = queryset.filter(created_at__date__lte=date_to)
+            queryset = queryset.filter(**{f'{date_field}__date__lte': date_to})
+        return queryset.order_by('-created_at')
+
+
+class AdminTopupListView(generics.ListAPIView):
+    serializer_class = AdminPaymentAttemptSerializer
+    permission_classes = [IsAuthenticated, IsFinance]
+    pagination_class = WalletTransactionPagination
+
+    def get_queryset(self):
+        queryset = PaymentAttempt.objects.select_related('user', 'wallet').filter(wallet__currency='KES')
+        payment_status = self.request.query_params.get('status', '').strip()
+        if payment_status in PaymentAttemptStatus.values:
+            queryset = queryset.filter(status=payment_status)
+        search = self.request.query_params.get('search', '').strip()
+        if search:
+            queryset = queryset.filter(
+                Q(user__email__icontains=search)
+                | Q(provider_receipt__icontains=search)
+                | Q(checkout_request_id__icontains=search),
+            )
+        date_field = 'updated_at' if payment_status == PaymentAttemptStatus.SUCCEEDED and self.request.query_params.get('date_basis') == 'confirmed' else 'created_at'
+        date_from = parse_date(self.request.query_params.get('date_from', '').strip())
+        if date_from:
+            queryset = queryset.filter(**{f'{date_field}__date__gte': date_from})
+        date_to = parse_date(self.request.query_params.get('date_to', '').strip())
+        if date_to:
+            queryset = queryset.filter(**{f'{date_field}__date__lte': date_to})
         return queryset.order_by('-created_at')
 
 
@@ -516,14 +569,20 @@ class AdminFinanceSummaryView(generics.GenericAPIView):
                 queryset = queryset.filter(created_at__date__lte=date_to)
             return queryset
 
-        wallet_totals = Wallet.objects.aggregate(
+        wallet_totals = Wallet.objects.filter(currency='KES').aggregate(
             liability=Sum('balance'),
             reserved=Sum('held_balance'),
+            shopping=Sum('shopping_balance'),
+            earnings=Sum('earnings_balance'),
+            shopping_held=Sum('shopping_held_balance'),
+            earnings_held=Sum('earnings_held_balance'),
         )
-        payout_totals = period(Payout.objects.all()).aggregate(
-            completed=Sum('amount', filter=Q(status=PayoutStatus.SUCCEEDED)),
-        )
-        active_payouts = Payout.objects.filter(status__in=[
+        completed_payouts = Payout.objects.filter(status=PayoutStatus.SUCCEEDED, currency='KES')
+        if date_from:
+            completed_payouts = completed_payouts.filter(processed_at__date__gte=date_from)
+        if date_to:
+            completed_payouts = completed_payouts.filter(processed_at__date__lte=date_to)
+        active_payouts = Payout.objects.filter(currency='KES', status__in=[
             PayoutStatus.REQUESTED, PayoutStatus.PROCESSING, PayoutStatus.UNKNOWN,
         ])
         pending_payouts = active_payouts.aggregate(
@@ -531,27 +590,82 @@ class AdminFinanceSummaryView(generics.GenericAPIView):
                 PayoutStatus.REQUESTED, PayoutStatus.PROCESSING, PayoutStatus.UNKNOWN,
             ])),
         )
-        ledger_totals = period(LedgerEntry.objects.all()).aggregate(
+        ledger_totals = period(LedgerEntry.objects.filter(currency='KES')).aggregate(
             commission=Sum('amount', filter=Q(entry_type=LedgerEntryType.COMMISSION_EARNED)),
             seller_released=Sum('amount', filter=Q(entry_type=LedgerEntryType.SELLER_PROCEEDS_RELEASE)),
             refunds_recorded=Sum('amount', filter=Q(entry_type=LedgerEntryType.REFUND_COMPLETED)),
-            customer_payments=Sum('amount', filter=Q(entry_type__in=[
-                LedgerEntryType.CUSTOMER_PAYMENT, LedgerEntryType.DELIVERY_FEE,
-            ])),
+            customer_payments=Sum('amount', filter=Q(entry_type=LedgerEntryType.CUSTOMER_PAYMENT)),
         )
-        payments = period(Payment.objects.all())
-        reconciliation = Payout.objects.filter(status=PayoutStatus.UNKNOWN).order_by('created_at')
+        payments = period(Payment.objects.filter(currency='KES'))
+        reconciliation = Payout.objects.filter(status=PayoutStatus.UNKNOWN, currency='KES').order_by('created_at')
         oldest_reconciliation = reconciliation.values_list('created_at', flat=True).first()
+        order_receipts = Payment.objects.filter(status=PaymentStatus.SUCCEEDED, provider='mpesa', currency='KES')
+        topups = PaymentAttempt.objects.filter(status=PaymentAttemptStatus.SUCCEEDED, wallet__currency='KES')
+        if date_from:
+            order_receipts = order_receipts.filter(completed_at__date__gte=date_from)
+            topups = topups.filter(updated_at__date__gte=date_from)
+        if date_to:
+            order_receipts = order_receipts.filter(completed_at__date__lte=date_to)
+            topups = topups.filter(updated_at__date__lte=date_to)
+
+        # Keep the chart bounded even when the summary itself covers all history.
+        trend_to = min(date_to or timezone.localdate(), timezone.localdate())
+        trend_from = max(date_from or trend_to - timedelta(days=29), trend_to - timedelta(days=89))
+        if trend_from > trend_to:
+            trend_from = trend_to
+
+        def daily_amounts(queryset, timestamp):
+            return {
+                row['day']: row['total']
+                for row in queryset.filter(**{
+                    f'{timestamp}__date__gte': trend_from,
+                    f'{timestamp}__date__lte': trend_to,
+                }).annotate(day=TruncDate(timestamp)).values('day').annotate(total=Sum('amount'))
+            }
+
+        daily_orders = daily_amounts(order_receipts, 'completed_at')
+        daily_topups = daily_amounts(topups, 'updated_at')
+        daily_payouts = daily_amounts(completed_payouts, 'processed_at')
+        payout_status_counts = dict(Payout.objects.filter(currency='KES').values_list('status').annotate(count=Count('id')))
+        payment_status_counts = dict(payments.values_list('status').annotate(count=Count('id')))
+        topup_status_counts = dict(period(PaymentAttempt.objects.filter(wallet__currency='KES')).values_list('status').annotate(count=Count('id')))
+        now = timezone.now()
+        payout_aging = active_payouts.aggregate(
+            under_24h=Count('id', filter=Q(created_at__gt=now - timedelta(hours=24))),
+            hours_24_to_72=Count('id', filter=Q(
+                created_at__lte=now - timedelta(hours=24),
+                created_at__gt=now - timedelta(hours=72),
+            )),
+            over_72h=Count('id', filter=Q(created_at__lte=now - timedelta(hours=72))),
+        )
         zero = Decimal('0.00')
+        trend = []
+        day = trend_from
+        while day <= trend_to:
+            trend.append({
+                'date': day.isoformat(),
+                'order_receipts': daily_orders.get(day, zero),
+                'wallet_topups': daily_topups.get(day, zero),
+                'b2c_payouts': daily_payouts.get(day, zero),
+            })
+            day += timedelta(days=1)
         return Response({
             'wallet_liability': wallet_totals['liability'] or zero,
             'wallet_reserved': wallet_totals['reserved'] or zero,
+            'wallet_breakdown': {
+                'shopping': wallet_totals['shopping'] or zero,
+                'earnings': wallet_totals['earnings'] or zero,
+                'shopping_held': wallet_totals['shopping_held'] or zero,
+                'earnings_held': wallet_totals['earnings_held'] or zero,
+            },
             'commission_earned': ledger_totals['commission'] or zero,
             'seller_proceeds_released': ledger_totals['seller_released'] or zero,
             'refunds_recorded': ledger_totals['refunds_recorded'] or zero,
             'customer_payments': ledger_totals['customer_payments'] or zero,
             'payouts_pending': pending_payouts['pending'] or zero,
-            'payouts_completed': payout_totals['completed'] or zero,
+            'payouts_completed': completed_payouts.aggregate(total=Sum('amount'))['total'] or zero,
+            'order_mpesa_receipts': order_receipts.aggregate(total=Sum('amount'))['total'] or zero,
+            'wallet_topups_received': topups.aggregate(total=Sum('amount'))['total'] or zero,
             'needs_reconciliation': reconciliation.count(),
             'reconciliation_over_24h': reconciliation.filter(
                 created_at__lte=timezone.now() - timedelta(hours=24),
@@ -561,6 +675,12 @@ class AdminFinanceSummaryView(generics.GenericAPIView):
             'pending_payments': payments.filter(status__in=[
                 PaymentStatus.INITIATED, PaymentStatus.PENDING,
             ]).count(),
+            'payment_status_counts': {value: payment_status_counts.get(value, 0) for value in PaymentStatus.values},
+            'topup_status_counts': {value: topup_status_counts.get(value, 0) for value in PaymentAttemptStatus.values},
+            'payout_status_counts': {value: payout_status_counts.get(value, 0) for value in PayoutStatus.values},
+            'payout_aging': payout_aging,
+            'trend': trend,
+            'trend_period': {'date_from': trend_from.isoformat(), 'date_to': trend_to.isoformat()},
             'period': {
                 'date_from': date_from.isoformat() if date_from else None,
                 'date_to': date_to.isoformat() if date_to else None,

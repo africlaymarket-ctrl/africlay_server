@@ -3,6 +3,7 @@ from django.urls import path
 from .views import (
     AdminFinanceSummaryView,
     AdminPaymentListView,
+    AdminTopupListView,
     AdminPayoutListView,
     AdminPayoutResolveView,
     FinanceTransactionDetailView,
@@ -33,6 +34,7 @@ urlpatterns = [
     path('payouts/provider-timeout/<str:token>/', PayoutProviderTimeoutView.as_view(), name='payout-provider-timeout'),
     path('admin/finance-summary/', AdminFinanceSummaryView.as_view(), name='admin-finance-summary'),
     path('admin/payments/', AdminPaymentListView.as_view(), name='admin-payment-list'),
+    path('admin/topups/', AdminTopupListView.as_view(), name='admin-topup-list'),
     path('admin/payouts/', AdminPayoutListView.as_view(), name='admin-payout-list'),
     path('admin/payouts/<uuid:pk>/resolve/', AdminPayoutResolveView.as_view(), name='admin-payout-resolve'),
     path('finance/transactions/', FinanceTransactionListView.as_view(), name='finance-transaction-list'),
