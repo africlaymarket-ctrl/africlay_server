@@ -10,6 +10,9 @@ from django.test import SimpleTestCase
 security_migration = import_module(
     'core.migrations.0001_secure_supabase_public_schema'
 )
+policy_acceptance_migration = import_module(
+    'authapp.migrations.0009_secure_policy_acceptance'
+)
 
 
 class PublicSchemaSecurityMigrationTests(SimpleTestCase):
@@ -37,6 +40,29 @@ class PublicSchemaSecurityMigrationTests(SimpleTestCase):
         self.assertIn('REVOKE ALL PRIVILEGES ON TABLE', sql)
         self.assertIn('ALTER DEFAULT PRIVILEGES', sql)
         self.assertNotIn('FORCE ROW LEVEL SECURITY', sql)
+
+    def test_policy_acceptance_migration_secures_table_created_later(self):
+        schema_editor = MagicMock()
+        schema_editor.connection.vendor = 'postgresql'
+        cursor = schema_editor.connection.cursor.return_value.__enter__.return_value
+
+        policy_acceptance_migration.secure_policy_acceptance(None, schema_editor)
+
+        cursor.execute.assert_called_once_with(
+            policy_acceptance_migration.SECURE_POLICY_ACCEPTANCE_SQL
+        )
+        sql = policy_acceptance_migration.SECURE_POLICY_ACCEPTANCE_SQL
+        self.assertIn('ALTER TABLE public.authapp_policyacceptance ENABLE ROW LEVEL SECURITY', sql)
+        self.assertIn('REVOKE ALL PRIVILEGES ON TABLE public.authapp_policyacceptance', sql)
+        self.assertNotIn('FORCE ROW LEVEL SECURITY', sql)
+
+    def test_policy_acceptance_migration_skips_sqlite(self):
+        schema_editor = MagicMock()
+        schema_editor.connection.vendor = 'sqlite'
+
+        policy_acceptance_migration.secure_policy_acceptance(None, schema_editor)
+
+        schema_editor.connection.cursor.assert_not_called()
 
 
 class PublicDatabaseAccessAuditTests(SimpleTestCase):
