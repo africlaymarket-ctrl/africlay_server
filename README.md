@@ -121,7 +121,7 @@ Set `BLESSEDTEXTS_API_KEY` and `BLESSEDTEXTS_SENDER_ID` on the backend service.
 Set `SMS_NOTIFICATIONS_ENABLED=True` only after the sender and credit balance
 have been confirmed. Do not put the key in the frontend, repository, or a
 checked-in environment file. The authenticated superadmin endpoint
-`POST /api/utilities/sms/send/` accepts one phone or up to 20 numbers and is
+`POST /api/common/sms/send/` accepts one phone or up to 20 numbers and is
 throttled. It sends a POST to BlessedTexts, never a GET containing the key.
 
 Marketplace SMS preferences are separate from email and default off. An opted-in
