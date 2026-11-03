@@ -44,6 +44,19 @@ class EmailDeliveryTests(TestCase):
         self.assertEqual(delivery.provider_message_id, 'provider-message-1')
         self.assertEqual(delivery.attempts, 2)
 
+    def test_exhausted_timeout_is_unknown_not_confirmed_failed(self):
+        with patch('notifications.services._send', side_effect=requests.Timeout):
+            with self.captureOnCommitCallbacks(execute=True):
+                notification = create_notification(self.user, title='Order paid', message='Payment confirmed.', email_preference='email_order_updates')
+            delivery = notification.email_delivery
+            delivery.attempts = 4
+            delivery.next_attempt_at = timezone.now() - timedelta(seconds=1)
+            delivery.save(update_fields=['attempts', 'next_attempt_at'])
+            self.assertFalse(send_notification_email(delivery.pk))
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, EmailDeliveryStatus.UNKNOWN)
+        self.assertEqual(delivery.attempts, 5)
+
     def test_html_escapes_notification_text_and_links_only_to_our_site(self):
         with self.captureOnCommitCallbacks(execute=False):
             notification = create_notification(

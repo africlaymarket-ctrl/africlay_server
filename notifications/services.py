@@ -114,7 +114,9 @@ def send_notification_email(delivery_id):
             delivery.save(update_fields=['status', 'failure_reason', 'updated_at'])
             return False
         if delivery.attempts >= MAX_ATTEMPTS or now - delivery.created_at >= timedelta(hours=23):
-            delivery.status = EmailDeliveryStatus.UNKNOWN if stale else EmailDeliveryStatus.FAILED
+            # A timed-out request may have been accepted. Do not report a
+            # confirmed failure once Resend's idempotency window has closed.
+            delivery.status = EmailDeliveryStatus.UNKNOWN if stale or delivery.status == EmailDeliveryStatus.RETRY else EmailDeliveryStatus.FAILED
             delivery.failure_reason = 'retry_window_expired'
             delivery.save(update_fields=['status', 'failure_reason', 'updated_at'])
             return False
@@ -130,7 +132,10 @@ def send_notification_email(delivery_id):
         with transaction.atomic():
             delivery = EmailDelivery.objects.select_for_update().get(pk=delivery_id)
             if delivery.status == EmailDeliveryStatus.SENDING:
-                delivery.status = EmailDeliveryStatus.RETRY if temporary and delivery.attempts < MAX_ATTEMPTS else EmailDeliveryStatus.FAILED
+                if temporary:
+                    delivery.status = EmailDeliveryStatus.RETRY if delivery.attempts < MAX_ATTEMPTS else EmailDeliveryStatus.UNKNOWN
+                else:
+                    delivery.status = EmailDeliveryStatus.FAILED
                 delivery.failure_reason = reason[:100]
                 delivery.next_attempt_at = timezone.now() + timedelta(seconds=min(300, 15 * (2 ** delivery.attempts))) if delivery.status == EmailDeliveryStatus.RETRY else None
                 delivery.save(update_fields=['status', 'failure_reason', 'next_attempt_at', 'updated_at'])
