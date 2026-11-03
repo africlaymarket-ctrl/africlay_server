@@ -2,9 +2,10 @@ from rest_framework import generics, permissions, status
 from rest_framework.exceptions import MethodNotAllowed, PermissionDenied, ValidationError
 from rest_framework.response import Response
 from django.db import IntegrityError, transaction
-from django.db.models import Prefetch
+from django.db.models import Prefetch, Q
 from django.shortcuts import get_object_or_404
 from uuid import UUID
+from collections import defaultdict
 
 from authapp.permissions import IsAdminRole, IsSeller, IsVerifiedUser
 from core.services import require_approved_kyc_for_publication
@@ -16,6 +17,27 @@ from .serializers import (
     CategorySerializer, ProductCatalogSerializer, ProductImageSerializer, ProductSerializer,
     SellerCategoryPathSerializer, TagSerializer,
 )
+
+
+def category_branch_ids(slug):
+    """Return a category and all descendants, regardless of tree depth."""
+    children = defaultdict(list)
+    root = None
+    for category_id, parent_id, category_slug in Category.objects.values_list('id', 'parent_id', 'slug'):
+        children[parent_id].append(category_id)
+        if category_slug == slug:
+            root = category_id
+    if root is None:
+        return []
+    branch = set()
+    stack = [root]
+    while stack:
+        category_id = stack.pop()
+        if category_id in branch:
+            continue
+        branch.add(category_id)
+        stack.extend(children[category_id])
+    return list(branch)
 
 
 class CategoryListCreateView(generics.ListCreateAPIView):
@@ -93,9 +115,19 @@ class ProductListView(generics.ListAPIView):
         tag_slug = self.request.query_params.get('tag')
         store_key = self.request.query_params.get('store')
         if category_slug:
-            queryset = queryset.filter(category__slug=category_slug)
+            queryset = queryset.filter(category_id__in=category_branch_ids(category_slug))
         if tag_slug:
             queryset = queryset.filter(tags__slug=tag_slug)
+        search = self.request.query_params.get('search', '').strip()[:100]
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search)
+                | Q(description__icontains=search)
+                | Q(category__name__icontains=search)
+                | Q(category__parent__name__icontains=search)
+                | Q(category__parent__parent__name__icontains=search)
+                | Q(tags__name__icontains=search)
+            )
         if store_key:
             try:
                 queryset = queryset.filter(store_id=UUID(store_key))

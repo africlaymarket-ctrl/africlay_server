@@ -25,7 +25,9 @@ class ProductApiTests(TestCase):
 		self.other_seller = create_verified_user(UserRole.SELLER, 'product-other-seller')
 		self.store = create_store(self.seller, 'Nairobi Clay Studio')
 		self.other_store = create_store(self.other_seller, 'Mombasa Ceramics')
+		self.default_category = Category.objects.create(name='General Goods', slug='general-goods')
 		self.product_data = {
+			'category': str(self.default_category.id),
 			'name': 'Hand-thrown Mug',
 			'slug': 'hand-thrown-mug',
 			'description': 'A locally made ceramic mug.',
@@ -125,6 +127,56 @@ class ProductApiTests(TestCase):
 
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
 		self.assertEqual([item['slug'] for item in response.data['results']], ['hand-thrown-mug'])
+
+	def test_main_and_subcategory_include_untagged_descendants(self):
+		self.approve_store_kyc()
+		root = Category.objects.create(name='Home', slug='home')
+		child = Category.objects.create(name='Kitchen', slug='kitchen', parent=root)
+		leaf = Category.objects.create(name='Mugs', slug='mugs', parent=child)
+		other = Category.objects.create(name='Garden', slug='garden')
+		self.authenticate_as(self.seller)
+		for name, slug, sku, category in [
+			('Clay mug', 'clay-mug', 'CLAY-1', leaf),
+			('Kitchen tray', 'kitchen-tray', 'TRAY-1', child),
+			('Plant pot', 'plant-pot', 'POT-1', other),
+		]:
+			response = self.client.post(reverse('product_management:product-manage-list'), {
+				**self.product_data, 'name': name, 'slug': slug, 'sku': sku,
+				'category': str(category.id), 'tags': [], 'status': 'published',
+			}, format='json')
+			self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+		self.client.credentials()
+		url = reverse('product_management:product-list')
+		for slug, expected in [('home', {'clay-mug', 'kitchen-tray'}), ('kitchen', {'clay-mug', 'kitchen-tray'}), ('mugs', {'clay-mug'}), ('missing', set())]:
+			response = self.client.get(url, {'category': slug})
+			self.assertEqual(response.status_code, status.HTTP_200_OK)
+			self.assertEqual({item['slug'] for item in response.data['results']}, expected)
+
+	def test_search_finds_untagged_products_by_name_description_and_category(self):
+		self.approve_store_kyc()
+		category = Category.objects.create(name='Handmade Ceramics', slug='handmade-ceramics')
+		self.authenticate_as(self.seller)
+		response = self.client.post(reverse('product_management:product-manage-list'), {
+			**self.product_data, 'name': 'Tea cup', 'slug': 'tea-cup', 'sku': 'CUP-1',
+			'description': 'Stoneware for hot drinks', 'category': str(category.id),
+			'tags': [], 'status': 'published',
+		}, format='json')
+		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+		self.client.credentials()
+		url = reverse('product_management:product-list')
+		for term in ('tea cup', 'stoneware', 'ceramics'):
+			result = self.client.get(url, {'search': term})
+			self.assertEqual(result.data['count'], 1)
+			self.assertEqual(result.data['results'][0]['slug'], 'tea-cup')
+
+	def test_publishing_requires_category_even_when_tags_are_present(self):
+		self.approve_store_kyc()
+		self.authenticate_as(self.seller)
+		response = self.client.post(reverse('product_management:product-manage-list'), {
+			**self.product_data, 'category': None, 'status': 'published',
+		}, format='json')
+		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+		self.assertIn('category', response.data)
 
 	def test_public_catalogue_can_retrieve_product_by_slug(self):
 		self.approve_store_kyc()

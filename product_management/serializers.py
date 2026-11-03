@@ -158,12 +158,15 @@ class ProductSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         attrs = super().validate(attrs)
         status = attrs.get('status', getattr(self.instance, 'status', None))
+        category = attrs.get('category', getattr(self.instance, 'category', None))
         measurements = {
             field: attrs.get(field, getattr(self.instance, field, None))
             for field in ('weight_kg', 'length_cm', 'width_cm', 'height_cm')
         }
 
         if status == 'published':
+            if category is None:
+                raise serializers.ValidationError({'category': 'Choose a category before publishing.'})
             missing = [field for field, value in measurements.items() if value is None]
             if missing:
                 raise serializers.ValidationError({
