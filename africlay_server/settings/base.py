@@ -296,6 +296,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Optional notification emails are sent after the database transaction commits.
 # Keep this disabled until the production sending domain has been verified.
 NOTIFICATION_EMAILS_ENABLED = os.getenv('NOTIFICATION_EMAILS_ENABLED', 'False').lower() in ('true', '1', 't')
+RESEND_WEBHOOK_SECRET = os.getenv('RESEND_WEBHOOK_SECRET', '').strip()
+PUBLIC_SITE_URL = os.getenv('PUBLIC_SITE_URL', 'https://www.africlaymarket.com').rstrip('/')
+SUPPORT_EMAIL_ADDRESS = os.getenv('SUPPORT_EMAIL_ADDRESS', 'support@africlaymarket.com').strip()
 EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', '5'))
 
 # SMS Gateway Configuration (Cradle Voices / CodeYetuSMS)

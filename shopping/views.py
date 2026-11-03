@@ -367,12 +367,14 @@ class CheckoutView(generics.GenericAPIView):
                     buyer,
                     title='Order placed',
                     message=(
-                        f'Your order {order.id} has been placed and is being processed.'
+                        f'Your order {order.id} for KSh {order.total_amount:,.2f} '
+                        f'(including KSh {order.shipping_cost:,.2f} delivery) has been placed and is being processed.'
                         if payment_method == PaymentMethod.WALLET
                         else f'Your order {order.id} is waiting for payment confirmation.'
                     ),
                     notification_type=NotificationType.ORDER,
                     email_preference='email_order_updates',
+                    action_path=f'/account/orders/{order.pk}',
                 )
                 for seller in sellers:
                     create_notification(
@@ -385,6 +387,7 @@ class CheckoutView(generics.GenericAPIView):
                         ),
                         notification_type=NotificationType.ORDER,
                         email_preference='email_seller_sales' if payment_method == PaymentMethod.WALLET else None,
+                        action_path=f'/sell/orders/{order.pk}',
                     )
 
                 if not serializer.validated_data.get('buy_now_product_id'):
@@ -501,6 +504,7 @@ class SellerOrderStatusUpdateView(generics.GenericAPIView):
                     if order.payment_status == PaymentStatus.PAID
                     else Decimal('0.00')
                 )
+                refund_credited = False
                 if order.payment_method == PaymentMethod.WALLET and fulfillment.settlement_status == SettlementStatus.HELD:
                     try:
                         wallet = Wallet.objects.get(user=order.buyer, currency=order.currency)
@@ -519,6 +523,7 @@ class SellerOrderStatusUpdateView(generics.GenericAPIView):
                         reference=f'order:{order.pk}:seller:{request.user.pk}:refund-completed',
                         metadata={'provider': 'wallet'},
                     )
+                    refund_credited = True
                 elif order.amount_paid > 0:
                     if fulfillment.settlement_status == SettlementStatus.HELD:
                         try:
@@ -550,6 +555,7 @@ class SellerOrderStatusUpdateView(generics.GenericAPIView):
                         reference=f'order:{order.pk}:seller:{request.user.pk}:refund-completed',
                         metadata={'provider': order.payment_method, 'destination': 'shopping_wallet'},
                     )
+                    refund_credited = True
 
                 order.item_subtotal = max(
                     Decimal('0.00'),
@@ -631,9 +637,11 @@ class SellerOrderStatusUpdateView(generics.GenericAPIView):
                 create_notification(
                     order.buyer,
                     title='Order shipped',
-                    message=f'Items from {request.user.full_name} in order {order.id} have shipped via {fulfillment.courier_name}.',
+                    message=(f'Items from {request.user.full_name} in order {order.id} have shipped '
+                             f'via {fulfillment.courier_name}. Tracking number: {fulfillment.tracking_number}.'),
                     notification_type=NotificationType.ORDER,
                     email_preference='email_order_updates',
+                    action_path=f'/account/orders/{order.pk}',
                 )
             elif target_status == OrderStatus.CANCELLED:
                 create_notification(
@@ -642,7 +650,17 @@ class SellerOrderStatusUpdateView(generics.GenericAPIView):
                     message=f'Items from {request.user.full_name} in order {order.id} were cancelled.',
                     notification_type=NotificationType.ORDER,
                     email_preference='email_order_updates',
+                    action_path=f'/account/orders/{order.pk}',
                 )
+                if refund_credited and refundable_amount > 0:
+                    create_notification(
+                        order.buyer,
+                        title='Refund credited to shopping wallet',
+                        message=f'KSh {refundable_amount:,.2f} from order {order.pk} is available in your shopping wallet.',
+                        notification_type=NotificationType.SYSTEM,
+                        email_preference='email_wallet_updates',
+                        action_path='/account/wallet',
+                    )
 
         return Response(SellerOrderDetailSerializer(order, context={'request': request}).data)
 
@@ -724,6 +742,15 @@ class OrderDeliveryConfirmationView(generics.GenericAPIView):
                     fulfillment.status = OrderStatus.DELIVERED
                     fulfillment.settlement_status = SettlementStatus.RELEASED
                     fulfillment.save(update_fields=['status', 'settlement_status', 'updated_at'])
+                    create_notification(
+                        fulfillment.seller,
+                        title='Seller earnings released',
+                        message=(f'KSh {fulfillment.seller_proceeds:,.2f} from order {order.pk} '
+                                 'is now available in your seller earnings wallet.'),
+                        notification_type=NotificationType.ORDER,
+                        email_preference='email_wallet_updates',
+                        action_path='/sell/earnings',
+                    )
 
                 if buyer_wallet is not None:
                     platform_amount = sum(
@@ -747,6 +774,7 @@ class OrderDeliveryConfirmationView(generics.GenericAPIView):
                 message=f'Delivery was confirmed for your order {order.id}.',
                 notification_type=NotificationType.ORDER,
                 email_preference='email_order_updates',
+                action_path=f'/account/orders/{order.pk}',
             )
             User = get_user_model()
             seller_ids = list(

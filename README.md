@@ -22,6 +22,29 @@ customers. Do not place the key in source control, frontend variables, or logs.
 After switching backends, test registration and password reset with real inboxes,
 then check Resend delivery status for a buyer and an opted-in seller.
 
+### Marketplace email delivery
+
+Optional order, booking, wallet, and seller updates create an `EmailDelivery` row in
+the same database transaction as the in-app notification. The first send runs after
+commit. Transient failures remain in the outbox and can be retried with
+`python manage.py process_email_outbox --limit 100`. Run that command every five
+minutes with a scheduler or worker to automate retries. It exits after processing
+due rows. Confirm any additional hosting charge before scheduling it.
+
+For delivery status, configure a Resend webhook at
+`https://africlay-server-main-v4.onrender.com/api/notifications/email-events/resend/`
+for `email.delivered`, `email.delivery_delayed`, `email.bounced`,
+`email.complained`, `email.suppressed`, and `email.failed`. Set its signing secret
+as `RESEND_WEBHOOK_SECRET` on the web service. The endpoint rejects callbacks
+when that secret is missing or the signature is invalid. `PUBLIC_SITE_URL`
+controls the destination for email buttons; `SUPPORT_EMAIL_ADDRESS` controls
+reply-to.
+
+The account's `/api/notifications/email-history/` route exposes only its own
+recent optional email statuses. Verification and reset codes remain immediate
+and are deliberately omitted from this history. Promotional email consent is
+recorded separately and defaults to off; this release does not send broadcasts.
+
 ## Media storage
 
 Media uses local `MEDIA_ROOT` for local development unless Supabase is configured.

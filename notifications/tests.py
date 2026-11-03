@@ -5,7 +5,7 @@ from django.core import mail
 from django.db import transaction
 from django.test import TestCase, override_settings
 
-from .models import Notification, NotificationType, create_notification
+from .models import EmailDelivery, EmailDeliveryStatus, Notification, NotificationType, create_notification
 
 
 @override_settings(
@@ -35,8 +35,11 @@ class NotificationEmailTests(TestCase):
 
 		self.assertEqual(len(callbacks), 1)
 		self.assertEqual(len(mail.outbox), 1)
-		self.assertEqual(mail.outbox[0].subject, notification.title)
+		self.assertEqual(mail.outbox[0].subject, f'AfriClay Market: {notification.title}')
 		self.assertEqual(mail.outbox[0].body, notification.message)
+		self.assertIn('AfriClay Market', mail.outbox[0].alternatives[0][0])
+		notification.email_delivery.refresh_from_db()
+		self.assertEqual(notification.email_delivery.status, EmailDeliveryStatus.SENT)
 		self.assertEqual(mail.outbox[0].from_email, 'notifications@africlay.com')
 		self.assertEqual(mail.outbox[0].to, [self.user.email])
 
@@ -55,9 +58,10 @@ class NotificationEmailTests(TestCase):
 		self.assertEqual(callbacks, [])
 		self.assertEqual(mail.outbox, [])
 		self.assertEqual(Notification.objects.count(), 0)
+		self.assertEqual(EmailDelivery.objects.count(), 0)
 
 	def test_email_failure_does_not_undo_notification(self):
-		with patch('django.core.mail.send_mail', side_effect=RuntimeError('mail unavailable')):
+		with patch('notifications.services._send', side_effect=RuntimeError('mail unavailable')):
 			with self.captureOnCommitCallbacks(execute=True):
 				notification = create_notification(
 					self.user,
@@ -67,6 +71,19 @@ class NotificationEmailTests(TestCase):
 				)
 
 		self.assertTrue(Notification.objects.filter(pk=notification.pk).exists())
+		notification.email_delivery.refresh_from_db()
+		self.assertEqual(notification.email_delivery.status, EmailDeliveryStatus.FAILED)
+
+	def test_optional_email_queue_failure_keeps_in_app_notification(self):
+		with patch('notifications.services.queue_notification_email', side_effect=RuntimeError('queue unavailable')):
+			with self.captureOnCommitCallbacks(execute=True):
+				with transaction.atomic():
+					notification = create_notification(
+						self.user, title='Order paid', message='Payment confirmed.',
+						email_preference='email_order_updates',
+					)
+		self.assertTrue(Notification.objects.filter(pk=notification.pk).exists())
+		self.assertFalse(EmailDelivery.objects.filter(notification=notification).exists())
 
 	@override_settings(NOTIFICATION_EMAILS_ENABLED=False)
 	def test_disabled_notification_email_does_not_register_commit_callback(self):

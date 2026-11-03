@@ -154,6 +154,7 @@ class BookingListCreateView(generics.ListCreateAPIView):
                 message=f'Your booking {booking.pk} for {service.name} has been requested.',
                 notification_type=NotificationType.BOOKING,
                 email_preference='email_booking_updates',
+                action_path='/account/bookings',
             )
             create_notification(
                 service.store.owner,
@@ -161,6 +162,7 @@ class BookingListCreateView(generics.ListCreateAPIView):
                 message=f'A customer requested {service.name}. Booking reference: {booking.pk}.',
                 notification_type=NotificationType.BOOKING,
                 email_preference='email_seller_bookings',
+                action_path='/sell/bookings',
             )
 
 
@@ -184,6 +186,7 @@ class BookingDetailView(generics.RetrieveDestroyAPIView):
                 message=f'Booking {instance.pk} for {instance.service.name} was cancelled by the customer.',
                 notification_type=NotificationType.BOOKING,
                 email_preference='email_seller_bookings',
+                action_path='/sell/bookings',
             )
 
 
@@ -214,4 +217,5 @@ class SellerBookingStatusUpdateView(generics.UpdateAPIView):
                 message=f'Your booking {booking.pk} for {booking.service.name} is now {booking.get_status_display().lower()}.',
                 notification_type=NotificationType.BOOKING,
                 email_preference='email_booking_updates',
+                action_path='/account/bookings',
             )

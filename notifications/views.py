@@ -5,8 +5,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from authapp.permissions import IsAuthenticated
-from .models import Notification
-from .serializers import NotificationSerializer
+from .models import EmailDelivery, Notification
+from .serializers import EmailDeliverySerializer, NotificationSerializer
 
 
 class NotificationListView(generics.ListAPIView):
@@ -43,3 +43,12 @@ class NotificationMarkAllReadView(APIView):
     def post(self, request, *args, **kwargs):
         updated = Notification.objects.filter(user=request.user, is_read=False).update(is_read=True)
         return Response({'marked_read': updated}, status=status.HTTP_200_OK)
+
+
+class EmailDeliveryListView(generics.ListAPIView):
+    serializer_class = EmailDeliverySerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = None
+
+    def get_queryset(self):
+        return EmailDelivery.objects.filter(notification__user=self.request.user).order_by('-created_at')[:30]

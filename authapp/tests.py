@@ -357,7 +357,15 @@ class AuthTestCase(TestCase):
         self.assertEqual(second.status_code, status.HTTP_200_OK)
         self.assertTrue(second.data['user']['profile']['notification_preferences']['email_order_updates'])
         self.assertEqual(self.client.patch(url, {'notification_preferences': {'email_order_updates': 'yes'}}, format='json').status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(self.client.patch(url, {'notification_preferences': {'email_promotions': True}}, format='json').status_code, status.HTTP_400_BAD_REQUEST)
+        from notifications.models import EmailConsentEvent
+        consent = self.client.patch(url, {'notification_preferences': {'email_promotions': True}}, format='json')
+        self.assertEqual(consent.status_code, status.HTTP_200_OK)
+        self.assertTrue(consent.data['user']['profile']['notification_preferences']['email_promotions'])
+        self.assertEqual(list(EmailConsentEvent.objects.filter(user=self.user).values_list('consented', flat=True)), [True])
+        self.client.patch(url, {'notification_preferences': {'email_promotions': True}}, format='json')
+        self.assertEqual(EmailConsentEvent.objects.filter(user=self.user).count(), 1)
+        self.client.patch(url, {'notification_preferences': {'email_promotions': False}}, format='json')
+        self.assertEqual(list(EmailConsentEvent.objects.filter(user=self.user).values_list('consented', flat=True)), [False, True])
 
     @patch('authapp.views.send_account_notice_email')
     def test_phone_change_sends_security_notice_after_commit(self, send_notice):

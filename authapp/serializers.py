@@ -73,11 +73,24 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
 class UserProfileUpdateSerializer(serializers.ModelSerializer):
     def validate_notification_preferences(self, value):
-        allowed = {'email_order_updates', 'email_seller_sales', 'email_booking_updates', 'email_seller_bookings'}
+        allowed = {'email_order_updates', 'email_seller_sales', 'email_booking_updates', 'email_seller_bookings', 'email_wallet_updates', 'email_promotions'}
         if not isinstance(value, dict) or set(value) - allowed or any(type(item) is not bool for item in value.values()):
             raise serializers.ValidationError('Use boolean values for the supported email preferences only.')
         current = self.instance.notification_preferences if self.instance else {}
         return {**(current if isinstance(current, dict) else {}), **value}
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        previous = instance.notification_preferences if isinstance(instance.notification_preferences, dict) else {}
+        updated = validated_data.get('notification_preferences', previous)
+        profile = super().update(instance, validated_data)
+        if previous.get('email_promotions') is not True and updated.get('email_promotions') is True:
+            from notifications.models import EmailConsentEvent
+            EmailConsentEvent.objects.create(user=profile.user, consented=True)
+        elif previous.get('email_promotions') is True and updated.get('email_promotions') is not True:
+            from notifications.models import EmailConsentEvent
+            EmailConsentEvent.objects.create(user=profile.user, consented=False)
+        return profile
 
     class Meta:
         model = UserProfile

@@ -291,6 +291,19 @@ def resolve_payout(
         'status', 'transaction_receipt', 'provider_result', 'failure_code',
         'failure_message', 'processed_at', 'resolved_by', 'resolution_note', 'updated_at',
     ])
+    source_label = 'seller earnings' if locked.balance_source == WalletBalanceSource.EARNINGS else 'shopping funds'
+    create_notification(
+        locked.wallet.user,
+        title='M-Pesa withdrawal completed' if succeeded else 'M-Pesa withdrawal failed',
+        message=(
+            f'Your withdrawal of KSh {locked.amount:,.2f} from {source_label} was confirmed by M-Pesa.'
+            if succeeded else
+            f'Your withdrawal of KSh {locked.amount:,.2f} from {source_label} failed. The reserved funds were restored.'
+        ),
+        notification_type=NotificationType.SYSTEM,
+        email_preference='email_wallet_updates',
+        action_path='/sell/earnings' if locked.balance_source == WalletBalanceSource.EARNINGS else '/account/wallet',
+    )
     return locked
 
 
@@ -564,9 +577,13 @@ class PaymentService:
             create_notification(
                 payment.order.buyer,
                 title='Payment confirmed',
-                message=f'Payment for order {payment.order_id} was confirmed.',
+                message=(f'M-Pesa payment of KSh {payment.amount:,.2f} for order {payment.order_id} '
+                         f'was confirmed. Total paid: KSh {payment.order.amount_paid:,.2f} '
+                         f'of KSh {payment.order.total_amount:,.2f}, including '
+                         f'KSh {payment.order.shipping_cost:,.2f} delivery.'),
                 notification_type=NotificationType.ORDER,
                 email_preference='email_order_updates',
+                action_path=f'/account/orders/{payment.order_id}',
             )
             if first_confirmed_payment and payment.purpose in {PaymentPurpose.ORDER_TOTAL, PaymentPurpose.DELIVERY_FEE}:
                 sellers = {
@@ -586,6 +603,7 @@ class PaymentService:
                         ),
                         notification_type=NotificationType.ORDER,
                         email_preference='email_seller_sales',
+                        action_path=f'/sell/orders/{payment.order_id}',
                     )
         else:
             payment.status = PaymentStatus.FAILED
@@ -601,6 +619,7 @@ class PaymentService:
                 message=f'Payment for order {payment.order_id} was not completed. Check your order before trying again.',
                 notification_type=NotificationType.ORDER,
                 email_preference='email_order_updates',
+                action_path=f'/account/orders/{payment.order_id}',
             )
 
         payment.save()
