@@ -8,6 +8,7 @@ from uuid import UUID
 from authapp.permissions import IsAdminRole, IsAuthenticated, IsSeller, IsVerifiedUser
 from core.services import require_approved_kyc_for_publication
 from core.pagination import CatalogPagination
+from notifications.models import NotificationType, create_notification
 from store_management.models import Store, StoreKYCStatus, StoreStatus
 
 from .models import Booking, BookingStatus, Service, ServiceCategory, ServiceImage, ServiceStatus
@@ -145,7 +146,22 @@ class BookingListCreateView(generics.ListCreateAPIView):
             store__status=StoreStatus.ACTIVE,
             store__kyc__status=StoreKYCStatus.APPROVED,
         )
-        serializer.save(customer=self.request.user, service=service)
+        with transaction.atomic():
+            booking = serializer.save(customer=self.request.user, service=service)
+            create_notification(
+                self.request.user,
+                title='Booking requested',
+                message=f'Your booking {booking.pk} for {service.name} has been requested.',
+                notification_type=NotificationType.BOOKING,
+                email_preference='email_booking_updates',
+            )
+            create_notification(
+                service.store.owner,
+                title='New service booking',
+                message=f'A customer requested {service.name}. Booking reference: {booking.pk}.',
+                notification_type=NotificationType.BOOKING,
+                email_preference='email_seller_bookings',
+            )
 
 
 class BookingDetailView(generics.RetrieveDestroyAPIView):
@@ -159,8 +175,16 @@ class BookingDetailView(generics.RetrieveDestroyAPIView):
     def perform_destroy(self, instance):
         if instance.status not in [BookingStatus.PENDING, BookingStatus.CONFIRMED]:
             raise ValidationError({'status': 'Only pending or confirmed bookings can be cancelled.'})
-        instance.status = BookingStatus.CANCELLED
-        instance.save(update_fields=['status', 'updated_at'])
+        with transaction.atomic():
+            instance.status = BookingStatus.CANCELLED
+            instance.save(update_fields=['status', 'updated_at'])
+            create_notification(
+                instance.service.store.owner,
+                title='Booking cancelled',
+                message=f'Booking {instance.pk} for {instance.service.name} was cancelled by the customer.',
+                notification_type=NotificationType.BOOKING,
+                email_preference='email_seller_bookings',
+            )
 
 
 class SellerBookingListView(generics.ListAPIView):
@@ -180,3 +204,14 @@ class SellerBookingStatusUpdateView(generics.UpdateAPIView):
 
     def get_queryset(self):
         return Booking.objects.filter(service__store__owner=self.request.user)
+
+    def perform_update(self, serializer):
+        with transaction.atomic():
+            booking = serializer.save()
+            create_notification(
+                booking.customer,
+                title=f'Booking {booking.get_status_display().lower()}',
+                message=f'Your booking {booking.pk} for {booking.service.name} is now {booking.get_status_display().lower()}.',
+                notification_type=NotificationType.BOOKING,
+                email_preference='email_booking_updates',
+            )

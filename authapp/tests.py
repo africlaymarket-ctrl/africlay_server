@@ -347,6 +347,57 @@ class AuthTestCase(TestCase):
         self.assertEqual(self.user.profile.first_name, 'Johnny')
         self.assertEqual(self.user.profile.bio, 'Artisan potter')
 
+    def test_email_preferences_are_validated_and_preserved(self):
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {generate_access_token(self.user)}')
+        url = reverse('authapp:user-me')
+        enabled = self.client.patch(url, {'notification_preferences': {'email_order_updates': True}}, format='json')
+        self.assertEqual(enabled.status_code, status.HTTP_200_OK)
+        self.assertTrue(enabled.data['user']['profile']['notification_preferences']['email_order_updates'])
+        second = self.client.patch(url, {'notification_preferences': {'email_seller_sales': True}}, format='json')
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertTrue(second.data['user']['profile']['notification_preferences']['email_order_updates'])
+        self.assertEqual(self.client.patch(url, {'notification_preferences': {'email_order_updates': 'yes'}}, format='json').status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self.client.patch(url, {'notification_preferences': {'email_promotions': True}}, format='json').status_code, status.HTTP_400_BAD_REQUEST)
+
+    @patch('authapp.views.send_account_notice_email')
+    def test_phone_change_sends_security_notice_after_commit(self, send_notice):
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {generate_access_token(self.user)}')
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.patch(reverse('authapp:user-me'), {'phone_number': '+254700000002'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        send_notice.assert_called_once()
+        self.assertEqual(send_notice.call_args.args[0], self.user_email)
+
+    @patch('authapp.views.send_account_notice_email')
+    def test_password_change_sends_security_notice_after_commit(self, send_notice):
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {generate_access_token(self.user)}')
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(reverse('authapp:change-password'), {
+                'old_password': self.user_password,
+                'new_password': 'NewStrongPassword123!',
+                'new_password_confirm': 'NewStrongPassword123!',
+            }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        send_notice.assert_called_once()
+        self.assertNotIn('NewStrongPassword123!', str(send_notice.call_args))
+
+    @patch('authapp.views.send_account_notice_email')
+    @patch('authapp.utils.send_otp_email')
+    def test_password_reset_sends_security_notice_after_commit(self, otp_email, send_notice):
+        requested = self.client.post(reverse('authapp:password-reset-request'), {'email': self.user_email}, format='json')
+        self.assertEqual(requested.status_code, status.HTTP_200_OK)
+        code = otp_email.call_args.args[1]
+        with self.captureOnCommitCallbacks(execute=True):
+            reset = self.client.post(reverse('authapp:password-reset-confirm'), {
+                'email': self.user_email,
+                'otp_code': code,
+                'new_password': 'ResetStrongPassword123!',
+                'new_password_confirm': 'ResetStrongPassword123!',
+            }, format='json')
+        self.assertEqual(reset.status_code, status.HTTP_200_OK)
+        send_notice.assert_called_once()
+        self.assertNotIn('ResetStrongPassword123!', str(send_notice.call_args))
+
     def test_user_address_crud(self):
         """Test CRUD for UserAddress endpoints."""
         access_token = generate_access_token(self.user)

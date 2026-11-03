@@ -4,6 +4,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Sum
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
+from notifications.models import NotificationType, create_notification
 
 from shopping.models import (
     OrderFulfillment,
@@ -530,6 +531,7 @@ class PaymentService:
                 order=payment.order,
                 status=PaymentStatus.SUCCEEDED,
             ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+            first_confirmed_payment = payment.order.amount_paid == 0
             amount_paid = min(payment.order.total_amount, already_paid + payment.amount)
             payment.order.amount_paid = amount_paid
             payment.order.delivery_fee_paid = (
@@ -559,6 +561,32 @@ class PaymentService:
             ).update(status=OrderStatus.PROCESSING)
             if payment.order.payment_status == OrderPaymentStatus.PAID:
                 hold_mpesa_seller_proceeds(payment.order)
+            create_notification(
+                payment.order.buyer,
+                title='Payment confirmed',
+                message=f'Payment for order {payment.order_id} was confirmed.',
+                notification_type=NotificationType.ORDER,
+                email_preference='email_order_updates',
+            )
+            if first_confirmed_payment and payment.purpose in {PaymentPurpose.ORDER_TOTAL, PaymentPurpose.DELIVERY_FEE}:
+                sellers = {
+                    fulfillment.seller_id: fulfillment.seller
+                    for fulfillment in OrderFulfillment.objects.filter(order=payment.order).select_related('seller')
+                }
+                for seller in sellers.values():
+                    delivery_only = payment.purpose == PaymentPurpose.DELIVERY_FEE
+                    create_notification(
+                        seller,
+                        title='New order ready' if delivery_only else 'New paid order',
+                        message=(
+                            f'The delivery fee for order {payment.order_id} was confirmed. '
+                            'The item price is due on delivery. You can prepare the order for fulfillment.'
+                            if delivery_only else
+                            f'Payment for order {payment.order_id} was confirmed. You can prepare it for fulfillment.'
+                        ),
+                        notification_type=NotificationType.ORDER,
+                        email_preference='email_seller_sales',
+                    )
         else:
             payment.status = PaymentStatus.FAILED
             payment.failure_code = str(result_code or '')
@@ -567,6 +595,13 @@ class PaymentService:
             if payment.order.amount_paid == 0:
                 payment.order.payment_status = OrderPaymentStatus.FAILED
                 payment.order.save(update_fields=['payment_status', 'updated_at'])
+            create_notification(
+                payment.order.buyer,
+                title='Payment not completed',
+                message=f'Payment for order {payment.order_id} was not completed. Check your order before trying again.',
+                notification_type=NotificationType.ORDER,
+                email_preference='email_order_updates',
+            )
 
         payment.save()
         return payment

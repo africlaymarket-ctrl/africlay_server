@@ -4,7 +4,8 @@ from django.core.files.storage import default_storage
 from rest_framework import status
 from rest_framework.test import APIClient
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
+from django.core import mail
 
 from authapp.models import UserRole
 from core.test_utils import authenticate_client, create_verified_user
@@ -258,6 +259,7 @@ class StoreApiTests(TestCase):
 		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 		self.assertEqual(StoreKYC.objects.count(), 1)
 
+	@override_settings(EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend', NOTIFICATION_EMAILS_ENABLED=False)
 	def test_admin_can_approve_submitted_kyc(self):
 		store = self.create_store()
 		self.client.post(
@@ -267,16 +269,20 @@ class StoreApiTests(TestCase):
 		admin = User.objects.create_superuser(email='admin@example.com', password='AdminPassword123!')
 		self.authenticate_as(admin)
 
-		response = self.client.post(
-			reverse('store_management:store-kyc-review', kwargs={'slug': store['slug']}),
-			{'decision': 'approved'},
-			format='json',
-		)
+		with self.captureOnCommitCallbacks(execute=True):
+			response = self.client.post(
+				reverse('store_management:store-kyc-review', kwargs={'slug': store['slug']}),
+				{'decision': 'approved'},
+				format='json',
+			)
 
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
 		self.assertEqual(response.data['status'], StoreKYCStatus.APPROVED)
 		self.assertEqual(response.data['reviewed_by'], str(admin.id))
+		self.assertEqual(len(mail.outbox), 1)
+		self.assertEqual(mail.outbox[0].to, [self.seller.email])
 
+	@override_settings(EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend')
 	def test_admin_rejection_requires_reason(self):
 		store = self.create_store()
 		self.client.post(
@@ -293,6 +299,15 @@ class StoreApiTests(TestCase):
 		)
 
 		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+		with self.captureOnCommitCallbacks(execute=True):
+			rejected = self.client.post(
+				reverse('store_management:store-kyc-review', kwargs={'slug': store['slug']}),
+				{'decision': 'rejected', 'rejection_reason': 'Please upload a readable document.'},
+				format='json',
+			)
+		self.assertEqual(rejected.status_code, status.HTTP_200_OK)
+		self.assertEqual(mail.outbox[-1].to, [self.seller.email])
+		self.assertIn('readable document', mail.outbox[-1].body)
 
 	def test_seller_can_resubmit_rejected_kyc(self):
 		store = self.create_store()

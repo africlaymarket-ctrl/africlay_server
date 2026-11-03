@@ -6,6 +6,7 @@ DEBUG disabled, and strict security settings enabled.
 """
 
 import os
+from email.utils import parseaddr
 from django.core.exceptions import ImproperlyConfigured
 from .base import *
 
@@ -60,6 +61,17 @@ EMAIL_PORT = int(os.getenv('EMAIL_PORT', 587))
 EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER or 'no-reply@africlay.com')
+
+# Resend uses HTTPS through Anymail, so Django's existing send_mail calls work
+# without depending on outbound SMTP access from the web service.
+if EMAIL_BACKEND == 'anymail.backends.resend.EmailBackend':
+    INSTALLED_APPS = [*INSTALLED_APPS, 'anymail']
+    resend_api_key = os.getenv('RESEND_API_KEY', '').strip()
+    if not resend_api_key:
+        raise ImproperlyConfigured('RESEND_API_KEY is required when the Resend email backend is selected.')
+    if parseaddr(DEFAULT_FROM_EMAIL)[1].lower().endswith('@resend.dev'):
+        raise ImproperlyConfigured('A verified sender domain is required for production email.')
+    ANYMAIL = {'RESEND_API_KEY': resend_api_key}
 
 LOGGING = {
     'version': 1,

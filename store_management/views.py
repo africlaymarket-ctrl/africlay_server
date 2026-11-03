@@ -10,7 +10,9 @@ from django.db import IntegrityError, transaction
 
 from authapp.models import AdminAuditLog, StaffRole
 from authapp.permissions import IsKYCReviewer, IsSeller, IsVerifiedUser
+from authapp.utils import send_account_notice_email
 from core.pagination import CatalogPagination
+from notifications.models import NotificationType, create_notification
 
 from .models import Store, StoreKYC, StoreKYCStatus, StoreStatus
 from .serializers import PublicStoreSerializer, StoreKYCReviewSerializer, StoreKYCSerializer, StoreSerializer
@@ -183,5 +185,14 @@ class StoreKYCReviewView(generics.GenericAPIView):
                 reason=kyc.rejection_reason,
                 metadata={'store_id': str(kyc.store_id), 'store_name': kyc.store.name},
             )
+            owner = kyc.store.owner
+            subject = 'Store verification approved' if decision == StoreKYCStatus.APPROVED else 'Store verification needs changes'
+            message = (
+                f'Your store {kyc.store.name} has been verified.'
+                if decision == StoreKYCStatus.APPROVED
+                else f'Your store {kyc.store.name} verification was not approved. Reason: {kyc.rejection_reason}'
+            )
+            create_notification(owner, title=subject, message=message, notification_type=NotificationType.SYSTEM)
+            transaction.on_commit(lambda: send_account_notice_email(owner.email, f'AfriClay: {subject}', message))
 
         return Response(StoreKYCQueueSerializer(kyc, context={'request': request}).data)

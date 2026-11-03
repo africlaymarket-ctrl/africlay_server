@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from django.utils import timezone
 from django.contrib.auth import get_user_model
+from django.db import transaction
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiResponse
 
 from .models import OTPType, UserAddress
@@ -33,6 +34,7 @@ from .utils import (
     refresh_access_token,
     blacklist_token,
     issue_otp,
+    send_account_notice_email,
 )
 
 User = get_user_model()
@@ -328,6 +330,10 @@ class PasswordResetConfirmView(APIView):
         user.set_password(new_password)
         user.auth_version += 1
         user.save(update_fields=['password', 'auth_version', 'updated_at'])
+        transaction.on_commit(lambda: send_account_notice_email(
+            user.email, 'AfriClay password reset',
+            'Your AfriClay password was reset. If this was not you, contact AfriClay support immediately.',
+        ))
 
         return Response(
             {'message': 'Password has been successfully reset. You can now log in with your new password.'},
@@ -358,6 +364,10 @@ class ChangePasswordView(APIView):
         user.set_password(new_password)
         user.auth_version += 1
         user.save(update_fields=['password', 'auth_version', 'updated_at'])
+        transaction.on_commit(lambda: send_account_notice_email(
+            user.email, 'AfriClay password changed',
+            'Your AfriClay password was changed. If this was not you, contact AfriClay support immediately.',
+        ))
 
         return Response(
             {'message': 'Password changed successfully.'},
@@ -408,8 +418,14 @@ class UserMeView(generics.RetrieveUpdateAPIView):
         # Update user-level phone number if provided
         phone_number = request.data.get('phone_number')
         if phone_number is not None:
-            user.phone_number = phone_number.strip() if phone_number else None
-            user.save(update_fields=['phone_number'])
+            new_phone = phone_number.strip() if phone_number else None
+            if user.phone_number != new_phone:
+                user.phone_number = new_phone
+                user.save(update_fields=['phone_number'])
+                transaction.on_commit(lambda: send_account_notice_email(
+                    user.email, 'AfriClay phone number changed',
+                    'The phone number on your AfriClay account was changed. If this was not you, contact AfriClay support immediately.',
+                ))
 
         return Response(
             {

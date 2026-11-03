@@ -8,9 +8,18 @@ from .models import Notification
 logger = logging.getLogger(__name__)
 
 
-def send_notification_email(notification_id):
+def send_notification_email(notification_id, email_preference):
     try:
-        notification = Notification.objects.select_related('user').get(pk=notification_id)
+        if email_preference not in {'email_order_updates', 'email_seller_sales', 'email_booking_updates', 'email_seller_bookings'}:
+            return False
+        notification = Notification.objects.select_related('user', 'user__profile').get(pk=notification_id)
+        preferences = notification.user.profile.notification_preferences
+        if not isinstance(preferences, dict):
+            preferences = {}
+        default_enabled = email_preference in {'email_order_updates', 'email_booking_updates'}
+        enabled = preferences.get(email_preference, default_enabled) is True
+        if not enabled:
+            return False
         recipient = notification.user.email.strip()
         if not recipient:
             return False

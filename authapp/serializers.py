@@ -72,6 +72,13 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
 
 class UserProfileUpdateSerializer(serializers.ModelSerializer):
+    def validate_notification_preferences(self, value):
+        allowed = {'email_order_updates', 'email_seller_sales', 'email_booking_updates', 'email_seller_bookings'}
+        if not isinstance(value, dict) or set(value) - allowed or any(type(item) is not bool for item in value.values()):
+            raise serializers.ValidationError('Use boolean values for the supported email preferences only.')
+        current = self.instance.notification_preferences if self.instance else {}
+        return {**(current if isinstance(current, dict) else {}), **value}
+
     class Meta:
         model = UserProfile
         fields = [

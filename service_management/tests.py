@@ -1,6 +1,7 @@
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase
+from django.test import TestCase, override_settings
+from django.core import mail
 from django.utils import timezone
 from django.urls import reverse
 from rest_framework import status
@@ -92,6 +93,40 @@ class ServiceApiTests(TestCase):
             {**self.service_data, 'status': 'published'}, format='json',
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    @override_settings(EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend', NOTIFICATION_EMAILS_ENABLED=True)
+    def test_booking_emails_follow_customer_updates_and_seller_opt_in(self):
+        buyer = create_verified_user(UserRole.BUYER, 'booking-buyer')
+        StoreKYC.objects.create(
+            store=self.store, business_name='Nairobi Clay Studio Ltd',
+            business_registration_number='BRN-BOOK', tax_identification_number='TAX-BOOK',
+            document_type='business_registration', document='kyc/test.pdf',
+            status=StoreKYCStatus.APPROVED, submitted_at=timezone.now(), reviewed_at=timezone.now(),
+        )
+        service = Service.objects.create(store=self.store, status='published', **self.service_data)
+        self.authenticate_as(buyer)
+        with self.captureOnCommitCallbacks(execute=True):
+            created = self.client.post(reverse('service_management:booking-list'), {
+                'service': str(service.pk), 'scheduled_at': timezone.now().isoformat(),
+            }, format='json')
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED, created.data)
+        self.assertEqual([message.to for message in mail.outbox], [[buyer.email]])
+
+        self.seller.profile.notification_preferences = {'email_seller_bookings': True}
+        self.seller.profile.save(update_fields=['notification_preferences'])
+        self.authenticate_as(self.seller)
+        with self.captureOnCommitCallbacks(execute=True):
+            confirmed = self.client.patch(reverse('service_management:seller-booking-status', args=[created.data['id']]), {
+                'status': 'confirmed',
+            }, format='json')
+        self.assertEqual(confirmed.status_code, status.HTTP_200_OK, confirmed.data)
+        self.assertEqual(mail.outbox[-1].to, [buyer.email])
+
+        self.authenticate_as(buyer)
+        with self.captureOnCommitCallbacks(execute=True):
+            cancelled = self.client.delete(reverse('service_management:booking-detail', args=[created.data['id']]))
+        self.assertEqual(cancelled.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(mail.outbox[-1].to, [self.seller.email])
 
     def test_seller_can_upload_service_image_through_endpoint(self):
         self.authenticate_as(self.seller)

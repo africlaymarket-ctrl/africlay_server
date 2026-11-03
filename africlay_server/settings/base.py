@@ -293,8 +293,8 @@ else:
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# Transactional requests must not wait on SMTP. In-app notifications remain
-# available even when best-effort notification emails are disabled.
+# Optional notification emails are sent after the database transaction commits.
+# Keep this disabled until the production sending domain has been verified.
 NOTIFICATION_EMAILS_ENABLED = os.getenv('NOTIFICATION_EMAILS_ENABLED', 'False').lower() in ('true', '1', 't')
 EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', '5'))
 

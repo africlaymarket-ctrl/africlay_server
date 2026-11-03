@@ -11,7 +11,7 @@ class NotificationType(models.TextChoices):
     PROMOTION = 'promotion', 'Promotion'
 
 
-def create_notification(user, *, title, message, notification_type=None):
+def create_notification(user, *, title, message, notification_type=None, email_preference=None):
     if notification_type is None:
         notification_type = NotificationType.SYSTEM
     notification = Notification.objects.create(
@@ -20,10 +20,10 @@ def create_notification(user, *, title, message, notification_type=None):
         message=message,
         notification_type=notification_type,
     )
-    if settings.NOTIFICATION_EMAILS_ENABLED:
+    if settings.NOTIFICATION_EMAILS_ENABLED and email_preference:
         from .services import send_notification_email
 
-        transaction.on_commit(lambda: send_notification_email(notification.pk))
+        transaction.on_commit(lambda: send_notification_email(notification.pk, email_preference))
     return notification
 
 

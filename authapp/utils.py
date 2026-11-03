@@ -1,4 +1,5 @@
 from datetime import datetime, timezone as dt_timezone
+import logging
 import uuid
 import secrets
 import jwt
@@ -12,6 +13,15 @@ from rest_framework.exceptions import AuthenticationFailed
 
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
+
+
+def send_account_notice_email(recipient, subject, message):
+    """Best-effort account notice; never include credentials or OTPs."""
+    try:
+        send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, [recipient], fail_silently=False)
+    except Exception:
+        logger.exception('Unable to send account notification.')
 
 
 def generate_access_token(user):

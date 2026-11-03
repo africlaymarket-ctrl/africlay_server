@@ -372,13 +372,19 @@ class CheckoutView(generics.GenericAPIView):
                         else f'Your order {order.id} is waiting for payment confirmation.'
                     ),
                     notification_type=NotificationType.ORDER,
+                    email_preference='email_order_updates',
                 )
                 for seller in sellers:
                     create_notification(
                         seller,
                         title='New order received',
-                        message=f'You have a new order ({order.id}) waiting for fulfillment.',
+                        message=(
+                            f'You have a new paid order ({order.id}) ready for fulfillment.'
+                            if payment_method == PaymentMethod.WALLET
+                            else f'You have a new order ({order.id}) awaiting payment confirmation.'
+                        ),
                         notification_type=NotificationType.ORDER,
+                        email_preference='email_seller_sales' if payment_method == PaymentMethod.WALLET else None,
                     )
 
                 if not serializer.validated_data.get('buy_now_product_id'):
@@ -627,6 +633,7 @@ class SellerOrderStatusUpdateView(generics.GenericAPIView):
                     title='Order shipped',
                     message=f'Items from {request.user.full_name} in order {order.id} have shipped via {fulfillment.courier_name}.',
                     notification_type=NotificationType.ORDER,
+                    email_preference='email_order_updates',
                 )
             elif target_status == OrderStatus.CANCELLED:
                 create_notification(
@@ -634,6 +641,7 @@ class SellerOrderStatusUpdateView(generics.GenericAPIView):
                     title='Order cancelled',
                     message=f'Items from {request.user.full_name} in order {order.id} were cancelled.',
                     notification_type=NotificationType.ORDER,
+                    email_preference='email_order_updates',
                 )
 
         return Response(SellerOrderDetailSerializer(order, context={'request': request}).data)
@@ -736,8 +744,9 @@ class OrderDeliveryConfirmationView(generics.GenericAPIView):
             create_notification(
                 order.buyer,
                 title='Order delivered',
-                message=f'Your order {order.id} has been delivered. Please confirm the delivery.',
+                message=f'Delivery was confirmed for your order {order.id}.',
                 notification_type=NotificationType.ORDER,
+                email_preference='email_order_updates',
             )
             User = get_user_model()
             seller_ids = list(

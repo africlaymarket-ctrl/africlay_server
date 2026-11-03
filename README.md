@@ -1,6 +1,27 @@
 # Africlay-server
 This is the server Side of the Africlay ecommerce platform
 
+## Transactional email
+
+Django sends verification codes, password reset codes, and account security notices
+through its configured email backend. Marketplace order and booking emails are
+optional; buyers can opt out and sellers must opt in from Profile > Settings.
+The in-app notification remains available if an optional email fails.
+
+To use Resend in production, verify an AfriClay sending domain in Resend, then set
+these Render service variables:
+
+- `RESEND_API_KEY`: send-only API key, stored as a secret
+- `EMAIL_BACKEND`: `anymail.backends.resend.EmailBackend`
+- `DEFAULT_FROM_EMAIL`: an address on the verified sending domain
+- `NOTIFICATION_EMAILS_ENABLED`: `True` to enable optional order and booking emails
+
+Leave optional notifications disabled until the sender is verified. Resend's
+`onboarding@resend.dev` address is for testing and cannot deliver to marketplace
+customers. Do not place the key in source control, frontend variables, or logs.
+After switching backends, test registration and password reset with real inboxes,
+then check Resend delivery status for a buyer and an opted-in seller.
+
 ## Media storage
 
 Media uses local `MEDIA_ROOT` for local development unless Supabase is configured.

@@ -133,6 +133,52 @@ class PayOnDeliveryFlowTests(TestCase):
             }},
         }
 
+    @override_settings(
+        EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
+        NOTIFICATION_EMAILS_ENABLED=True,
+    )
+    @patch('payments.gateways.mpesa.MpesaGateway.initiate_payment')
+    def test_seller_purchase_email_waits_for_payment_and_duplicate_callback_is_silent(self, initiate_payment):
+        from django.core import mail
+        from notifications.models import Notification
+
+        initiate_payment.return_value = {
+            'MerchantRequestID': 'merchant-email',
+            'CheckoutRequestID': 'checkout-email',
+        }
+        self.seller.profile.notification_preferences = {'email_seller_sales': True}
+        self.seller.profile.save(update_fields=['notification_preferences'])
+        self.buyer.profile.notification_preferences = {'email_order_updates': False}
+        self.buyer.profile.save(update_fields=['notification_preferences'])
+        self.client.force_authenticate(self.buyer)
+        with self.captureOnCommitCallbacks(execute=True):
+            checkout = self.client.post(reverse('shopping:checkout'), {
+                'shipping_address': '123 Main Street',
+                'shipping_city': 'Nairobi',
+                'shipping_postal_code': '00100',
+                'shipping_country': 'Kenya',
+                'payment_method': 'mpesa',
+                'payment_option': 'pay_on_delivery',
+            }, format='json')
+        self.assertEqual(checkout.status_code, status.HTTP_201_CREATED, checkout.data)
+        self.assertEqual(mail.outbox, [])
+        order = Order.objects.get(pk=checkout.data['id'])
+        initiated = self.client.post(reverse('payments:payment-initiate'), {
+            'order_id': str(order.pk), 'phone_number': '254712345678',
+        }, format='json')
+        self.assertEqual(initiated.status_code, status.HTTP_201_CREATED, initiated.data)
+        payment = Payment.objects.get(pk=initiated.data['id'])
+        with self.captureOnCommitCallbacks(execute=True):
+            PaymentService.process_mpesa_callback(self.callback(payment, 'EMAIL220'))
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, [self.seller.email])
+        self.assertEqual(Notification.objects.filter(user=self.seller, title='New order ready').count(), 1)
+        self.assertIn('item price is due on delivery', mail.outbox[0].body)
+        with self.captureOnCommitCallbacks(execute=True):
+            PaymentService.process_mpesa_callback(self.callback(payment, 'EMAIL220'))
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(Notification.objects.filter(user=self.seller, title='New order ready').count(), 1)
+
     def test_delivery_fee_survives_quote_checkout_and_order_views(self):
         payload = {
             'shipping_address': '123 Main Street',
