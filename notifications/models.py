@@ -40,6 +40,22 @@ def create_notification(user, *, title, message, notification_type=None, email_p
                     logger.exception('Unable to dispatch optional email for notification %s.', notification.pk)
 
             transaction.on_commit(dispatch)
+    if settings.SMS_NOTIFICATIONS_ENABLED and email_preference:
+        from .sms import queue_notification_sms, dispatch_notification_sms
+        try:
+            with transaction.atomic():
+                sms_delivery = queue_notification_sms(notification, email_preference)
+        except Exception:
+            logger.exception('Unable to queue optional SMS for notification %s.', notification.pk)
+            sms_delivery = None
+        if sms_delivery is not None:
+            def dispatch_sms_after_commit():
+                try:
+                    dispatch_notification_sms(sms_delivery.pk)
+                except Exception:
+                    logger.exception('Unable to dispatch optional SMS for notification %s.', notification.pk)
+
+            transaction.on_commit(dispatch_sms_after_commit)
     return notification
 
 
@@ -106,6 +122,32 @@ class EmailConsentEvent(models.Model):
     consented = models.BooleanField()
     source = models.CharField(max_length=32, default='profile_settings')
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+
+class SMSDeliveryStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending'
+    SUBMITTING = 'submitting', 'Submitting'
+    ACCEPTED = 'accepted', 'Accepted by provider'
+    REJECTED = 'rejected', 'Rejected'
+    UNKNOWN = 'unknown', 'Outcome unknown'
+    SUPPRESSED = 'suppressed', 'Preference or phone changed'
+
+
+class SMSDelivery(TimestampedModel):
+    """One provider submission per opted-in notification; no automatic retry."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    notification = models.OneToOneField(Notification, on_delete=models.CASCADE, related_name='sms_delivery')
+    recipient = models.CharField(max_length=12)
+    message = models.CharField(max_length=160)
+    preference = models.CharField(max_length=48)
+    status = models.CharField(max_length=12, choices=SMSDeliveryStatus.choices, default=SMSDeliveryStatus.PENDING)
+    provider_code = models.CharField(max_length=32, blank=True)
+    provider_message_id = models.CharField(max_length=128, blank=True)
+    cost = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
 
     class Meta:
         ordering = ['-created_at']

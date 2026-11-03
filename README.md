@@ -115,6 +115,23 @@ This database hardening is separate from Supabase Storage bucket policies. Produ
 media access and private KYC document access must continue to be managed through
 their existing Storage configuration.
 
+## BlessedTexts SMS
+
+Set `BLESSEDTEXTS_API_KEY` and `BLESSEDTEXTS_SENDER_ID` on the backend service.
+Set `SMS_NOTIFICATIONS_ENABLED=True` only after the sender and credit balance
+have been confirmed. Do not put the key in the frontend, repository, or a
+checked-in environment file. The authenticated superadmin endpoint
+`POST /api/utilities/sms/send/` accepts one phone or up to 20 numbers and is
+throttled. It sends a POST to BlessedTexts, never a GET containing the key.
+
+Marketplace SMS preferences are separate from email and default off. An opted-in
+member with a valid Kenyan mobile number can receive generic order, booking,
+or wallet updates. `/api/notifications/sms-history/` shows only that member's
+submission statuses. `accepted` means the provider accepted the request; the
+supplied API does not document a delivery callback or idempotency key. Unknown
+outcomes are not retried automatically; inspect the provider dashboard before
+resubmitting. The SMS channel is not used for password or email verification.
+
 ## Persistent API smoke test
 
 Run the core endpoint workflow against the configured database with:

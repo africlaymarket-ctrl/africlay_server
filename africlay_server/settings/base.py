@@ -301,9 +301,11 @@ PUBLIC_SITE_URL = os.getenv('PUBLIC_SITE_URL', 'https://www.africlaymarket.com')
 SUPPORT_EMAIL_ADDRESS = os.getenv('SUPPORT_EMAIL_ADDRESS', 'support@africlaymarket.com').strip()
 EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', '5'))
 
-# SMS Gateway Configuration (Cradle Voices / CodeYetuSMS)
-SMS_URL = os.getenv('SMS_URL', 'https://api.cradlevoices.com/v1/sms/send')
-SMS_TOKEN = os.getenv('SMS_TOKEN', '')
+# BlessedTexts credentials belong only in the deployment environment.
+BLESSEDTEXTS_URL = 'https://sms.blessedtexts.com/api/sms/v1/sendsms'
+BLESSEDTEXTS_API_KEY = os.getenv('BLESSEDTEXTS_API_KEY', '')
+BLESSEDTEXTS_SENDER_ID = os.getenv('BLESSEDTEXTS_SENDER_ID', 'AFRICLAYMKT')
+SMS_NOTIFICATIONS_ENABLED = os.getenv('SMS_NOTIFICATIONS_ENABLED', 'False').lower() in ('true', '1', 't')
 
 # M-Pesa Daraja credentials are supplied by the deployment environment.
 MPESA_ENVIRONMENT = os.getenv('MPESA_ENVIRONMENT', 'sandbox').strip().lower()

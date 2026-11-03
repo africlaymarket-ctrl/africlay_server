@@ -356,6 +356,11 @@ class AuthTestCase(TestCase):
         second = self.client.patch(url, {'notification_preferences': {'email_seller_sales': True}}, format='json')
         self.assertEqual(second.status_code, status.HTTP_200_OK)
         self.assertTrue(second.data['user']['profile']['notification_preferences']['email_order_updates'])
+        sms = self.client.patch(url, {'notification_preferences': {'sms_order_updates': True}}, format='json')
+        self.assertEqual(sms.status_code, status.HTTP_200_OK)
+        self.assertTrue(sms.data['user']['profile']['notification_preferences']['sms_order_updates'])
+        self.assertTrue(sms.data['user']['profile']['notification_preferences']['email_order_updates'])
+        self.assertEqual(self.client.patch(url, {'notification_preferences': {'sms_order_updates': 'yes'}}, format='json').status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(self.client.patch(url, {'notification_preferences': {'email_order_updates': 'yes'}}, format='json').status_code, status.HTTP_400_BAD_REQUEST)
         from notifications.models import EmailConsentEvent
         consent = self.client.patch(url, {'notification_preferences': {'email_promotions': True}}, format='json')
@@ -369,12 +374,26 @@ class AuthTestCase(TestCase):
 
     @patch('authapp.views.send_account_notice_email')
     def test_phone_change_sends_security_notice_after_commit(self, send_notice):
+        self.user.profile.notification_preferences = {'sms_order_updates': True, 'email_order_updates': True}
+        self.user.profile.save(update_fields=['notification_preferences'])
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {generate_access_token(self.user)}')
         with self.captureOnCommitCallbacks(execute=True):
             response = self.client.patch(reverse('authapp:user-me'), {'phone_number': '+254700000002'}, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         send_notice.assert_called_once()
         self.assertEqual(send_notice.call_args.args[0], self.user_email)
+        self.user.profile.refresh_from_db()
+        self.assertFalse(self.user.profile.notification_preferences['sms_order_updates'])
+        self.assertTrue(self.user.profile.notification_preferences['email_order_updates'])
+
+    def test_sms_opt_in_requires_a_valid_account_phone(self):
+        self.user.phone_number = None
+        self.user.save(update_fields=['phone_number'])
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {generate_access_token(self.user)}')
+        response = self.client.patch(reverse('authapp:user-me'), {
+            'notification_preferences': {'sms_order_updates': True},
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     @patch('authapp.views.send_account_notice_email')
     def test_password_change_sends_security_notice_after_commit(self, send_notice):

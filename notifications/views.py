@@ -5,8 +5,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from authapp.permissions import IsAuthenticated
-from .models import EmailDelivery, Notification
-from .serializers import EmailDeliverySerializer, NotificationSerializer
+from .models import EmailDelivery, Notification, SMSDelivery
+from .serializers import EmailDeliverySerializer, NotificationSerializer, SMSDeliverySerializer
 
 
 class NotificationListView(generics.ListAPIView):
@@ -52,3 +52,12 @@ class EmailDeliveryListView(generics.ListAPIView):
 
     def get_queryset(self):
         return EmailDelivery.objects.filter(notification__user=self.request.user).order_by('-created_at')[:30]
+
+
+class SMSDeliveryListView(generics.ListAPIView):
+    serializer_class = SMSDeliverySerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = None
+
+    def get_queryset(self):
+        return SMSDelivery.objects.filter(notification__user=self.request.user).select_related('notification').order_by('-created_at')[:30]

@@ -73,9 +73,19 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
 class UserProfileUpdateSerializer(serializers.ModelSerializer):
     def validate_notification_preferences(self, value):
-        allowed = {'email_order_updates', 'email_seller_sales', 'email_booking_updates', 'email_seller_bookings', 'email_wallet_updates', 'email_promotions'}
+        allowed = {
+            'email_order_updates', 'email_seller_sales', 'email_booking_updates',
+            'email_seller_bookings', 'email_wallet_updates', 'email_promotions',
+            'sms_order_updates', 'sms_seller_sales', 'sms_booking_updates',
+            'sms_seller_bookings', 'sms_wallet_updates',
+        }
         if not isinstance(value, dict) or set(value) - allowed or any(type(item) is not bool for item in value.values()):
-            raise serializers.ValidationError('Use boolean values for the supported email preferences only.')
+            raise serializers.ValidationError('Use boolean values for the supported notification preferences only.')
+        if any(key.startswith('sms_') and enabled for key, enabled in value.items()):
+            from utility_services.utils import normalize_phone_number, valid_sms_phone
+            phone = normalize_phone_number(self.instance.user.phone_number) if self.instance else ''
+            if not valid_sms_phone(phone):
+                raise serializers.ValidationError('Add a valid Kenyan mobile number before enabling SMS updates.')
         current = self.instance.notification_preferences if self.instance else {}
         return {**(current if isinstance(current, dict) else {}), **value}
 

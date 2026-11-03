@@ -422,6 +422,13 @@ class UserMeView(generics.RetrieveUpdateAPIView):
             if user.phone_number != new_phone:
                 user.phone_number = new_phone
                 user.save(update_fields=['phone_number'])
+                # SMS consent applies to the previous number, never a replacement.
+                preferences = profile.notification_preferences if isinstance(profile.notification_preferences, dict) else {}
+                profile.notification_preferences = {
+                    **preferences,
+                    **{key: False for key in preferences if key.startswith('sms_')},
+                }
+                profile.save(update_fields=['notification_preferences'])
                 transaction.on_commit(lambda: send_account_notice_email(
                     user.email, 'AfriClay phone number changed',
                     'The phone number on your AfriClay account was changed. If this was not you, contact AfriClay support immediately.',

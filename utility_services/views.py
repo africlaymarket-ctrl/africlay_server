@@ -1,22 +1,32 @@
+import logging
+
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
+import uuid
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 
 from authapp.permissions import IsSuperAdmin
+from authapp.models import AdminAuditLog
 from .serializers import SendSMSSerializer, SendSMSResponseSerializer
 from .utils import SendSMS
+
+logger = logging.getLogger(__name__)
 
 
 @extend_schema(
     tags=['Utility Services'],
     summary='Send SMS notification',
-    description='Dispatches an SMS message to one or more recipient phone numbers using the Cradle Voices SMS API.',
+    description='Dispatches an SMS through BlessedTexts. Success means accepted by the provider, not delivered.',
     request=SendSMSSerializer,
     responses={
         200: OpenApiResponse(
             response=SendSMSResponseSerializer,
-            description='SMS sent successfully',
+            description='All SMS requests accepted by the provider; handset delivery is unconfirmed',
+        ),
+        202: OpenApiResponse(
+            response=SendSMSResponseSerializer,
+            description='Provider outcome is unknown; reconcile before sending again',
         ),
         400: OpenApiResponse(
             response=SendSMSResponseSerializer,
@@ -42,12 +52,32 @@ class SendSMSView(APIView):
 
         recipients = phone_numbers if phone_numbers else phone_number
 
+        batch_id = str(uuid.uuid4())
+        AdminAuditLog.objects.create(
+            actor=request.user, action='sms_submission_requested',
+            target_type='sms_batch', target_id=batch_id,
+            metadata={'recipient_count': len(recipients) if isinstance(recipients, list) else 1},
+        )
+
         success, result_message = SendSMS.send(
             message=message,
             phone_numbers=recipients,
         )
 
-        response_status = status.HTTP_200_OK if success else status.HTTP_400_BAD_REQUEST
+        outcome_unknown = 'outcome unknown' in result_message.lower()
+        try:
+            AdminAuditLog.objects.create(
+                actor=request.user, action='sms_submission_result',
+                target_type='sms_batch', target_id=batch_id,
+                metadata={'accepted_all': success, 'outcome_unknown': outcome_unknown},
+            )
+        except Exception:
+            # The request audit above is durable. A result-audit failure must not
+            # turn a submitted SMS into HTTP 500 and encourage a duplicate send.
+            logger.exception('Unable to record SMS submission outcome for batch %s.', batch_id)
+
+        response_status = (status.HTTP_200_OK if success else
+                           status.HTTP_202_ACCEPTED if outcome_unknown else status.HTTP_400_BAD_REQUEST)
         return Response(
             {
                 "success": success,
