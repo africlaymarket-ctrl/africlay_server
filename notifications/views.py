@@ -1,4 +1,5 @@
 from drf_spectacular.utils import extend_schema, inline_serializer
+from django.conf import settings
 from rest_framework import generics, status
 from rest_framework import serializers
 from rest_framework.response import Response
@@ -61,3 +62,16 @@ class SMSDeliveryListView(generics.ListAPIView):
 
     def get_queryset(self):
         return SMSDelivery.objects.filter(notification__user=self.request.user).select_related('notification').order_by('-created_at')[:30]
+
+
+class SMSFeatureStatusView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        responses=inline_serializer(
+            name='SMSFeatureStatusResponse',
+            fields={'enabled': serializers.BooleanField()},
+        ),
+    )
+    def get(self, request):
+        return Response({'enabled': settings.SMS_NOTIFICATIONS_ENABLED})

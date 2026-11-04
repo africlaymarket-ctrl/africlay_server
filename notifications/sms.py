@@ -46,7 +46,7 @@ def queue_notification_sms(notification, email_preference):
         return None
     # Notification titles can contain item or customer details. Keep SMS generic
     # until the account phone number has a separate ownership-verification flow.
-    message = f'AfriClay Market: {ALERT_TEXT[preference]} Sign in to see the update.'
+    message = f'AfriClay Market: {ALERT_TEXT[preference]} Details are in your AfriClay account.'
     return SMSDelivery.objects.create(
         notification=notification, recipient=phone, message=message, preference=preference,
     )

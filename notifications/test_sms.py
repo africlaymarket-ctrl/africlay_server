@@ -37,6 +37,8 @@ class MarketplaceSMSTests(TestCase):
         self.assertEqual(delivery.status, SMSDeliveryStatus.ACCEPTED)
         self.assertEqual(delivery.provider_message_id, 'provider-1')
         self.assertNotIn('Sensitive order details', delivery.message)
+        self.assertNotIn('Sign in', delivery.message)
+        self.assertNotIn('http', delivery.message)
 
     def test_missing_phone_or_opt_out_before_commit_suppresses_send(self):
         self.user.profile.notification_preferences = {'sms_order_updates': True}
@@ -86,3 +88,12 @@ class MarketplaceSMSTests(TestCase):
         self.assertEqual(data[0]['status'], 'accepted')
         self.assertNotIn('recipient', data[0])
         self.assertNotIn('message', data[0])
+
+    def test_sms_availability_reflects_server_flag_for_authenticated_members(self):
+        client = APIClient()
+        url = reverse('notifications:sms-status')
+        self.assertEqual(client.get(url).status_code, 401)
+        client.force_authenticate(user=self.user)
+        self.assertEqual(client.get(url).data, {'enabled': True})
+        with self.settings(SMS_NOTIFICATIONS_ENABLED=False):
+            self.assertEqual(client.get(url).data, {'enabled': False})
