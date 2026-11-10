@@ -1,13 +1,16 @@
 from django.contrib.auth import get_user_model
 from rest_framework import generics, permissions, status
+from rest_framework.pagination import LimitOffsetPagination
 from rest_framework.response import Response
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from django.shortcuts import get_object_or_404
 from django.db import transaction, IntegrityError
 from django.utils import timezone
+from django.conf import settings
 from decimal import Decimal, ROUND_HALF_UP
 
-from authapp.permissions import IsAuthenticated, IsBuyer, IsSeller, IsVerifiedUser
+from authapp.models import AdminAuditLog, StaffRole
+from authapp.permissions import IsAuthenticated, IsBuyer, IsLogistics, IsSeller, IsSuperAdmin, IsVerifiedUser
 from product_management.models import Product
 
 from payments.models import LedgerEntryType, Wallet, WalletBalanceSource, WalletTransactionType
@@ -25,20 +28,32 @@ from notifications.models import NotificationType, create_notification
 
 from .models import (
     Cart, CartItem, Order, OrderFulfillment, OrderItem, OrderStatus, PaymentMethod,
-    PaymentOption, PaymentStatus, SettlementStatus, Wishlist, WishlistItem,
+    PaymentOption, PaymentStatus, PickupPoint, SettlementStatus, ShipmentEvent, ShipmentStage, Wishlist, WishlistItem,
+    DeliveryMethod, HomeDeliveryLeg, HomeDeliveryEvent, HomeDeliveryStage,
 )
 from .serializers import (
     CartSerializer,
     CartItemSerializer,
+    ConfirmCheckoutSerializer,
     CreateCheckoutSerializer,
     OrderDetailSerializer,
+    OrderListSerializer,
     OrderStatusUpdateSerializer,
     SellerOrderDetailSerializer,
+    SellerOrderListSerializer,
+    PickupPointSerializer,
+    LogisticsEventInputSerializer,
+    LogisticsAssignmentInputSerializer,
+    LogisticsShipmentSerializer,
+    RiderHomeDeliverySerializer,
+    RiderHomeDeliveryEventInputSerializer,
     SupportedShippingTownListSerializer,
     WishlistSerializer,
     WishlistItemSerializer,
 )
 from .shipping import SUPPORTED_TOWNS, ShippingQuoteError, quote_cart_items
+from .geoapify import DoorstepQuoteError, quote_doorstep_leg, sign_doorstep_quote, read_doorstep_quote
+from .locations import LocationError, find_home_locations
 
 
 COMMISSION_RATE = Decimal('0.1000')
@@ -51,6 +66,41 @@ class SupportedShippingTownListView(generics.GenericAPIView):
 
     def get(self, request, *args, **kwargs):
         return Response({'towns': list(SUPPORTED_TOWNS)})
+
+
+class PickupPointListView(generics.ListAPIView):
+    permission_classes = [permissions.AllowAny]
+    serializer_class = PickupPointSerializer
+    pagination_class = None
+
+    def get_queryset(self):
+        return PickupPoint.objects.filter(active=True)
+
+
+class DoorstepLocationSearchView(generics.GenericAPIView):
+    """Return signed, precise Kenyan place choices; never expose the provider key."""
+
+    permission_classes = [IsAuthenticated, IsBuyer]
+    throttle_scope = 'doorstep_address_search'
+
+    def post(self, request, *args, **kwargs):
+        if not settings.DOORSTEP_CHECKOUT_ENABLED:
+            raise ValidationError({'delivery_method': 'Doorstep delivery is not available yet.'})
+        search = str(request.data.get('query') or '').strip()
+        point_id = request.data.get('pickup_point_id')
+        if len(search) < 5 or len(search) > 200:
+            raise ValidationError({'query': 'Enter 5 to 200 characters of a street address or landmark.'})
+        try:
+            point = PickupPoint.objects.filter(pk=point_id, active=True).first()
+        except (ValueError, TypeError):
+            point = None
+        if point is None or point.latitude is None or point.longitude is None:
+            raise ValidationError({'pickup_point_id': 'Choose a pickup point with a confirmed map pin.'})
+        try:
+            locations = find_home_locations(text=search, pickup_point=point, user_id=request.user.pk)
+        except LocationError as error:
+            raise ValidationError({'query': str(error)}) from error
+        return Response({'locations': locations})
 
 
 def _cart_items(cart):
@@ -204,11 +254,34 @@ class ShippingQuoteView(generics.GenericAPIView):
             quotes = quote_cart_items(cart_items, serializer.validated_data['shipping_city'])
         except ShippingQuoteError as error:
             raise ValidationError({'shipping_city': str(error)}) from error
-        return Response(_shipping_quote_payload(quotes))
+        quote_payload = _shipping_quote_payload(quotes)
+        point = serializer.validated_data.get('pickup_point')
+        quote_payload['pickup_point_address'] = point.address if point else None
+        quote_payload['pickup_delivery_cost'] = quote_payload['shipping_cost']
+        quote_payload['doorstep_delivery_cost'] = Decimal('0.00')
+        if serializer.validated_data['delivery_method'] == DeliveryMethod.DOORSTEP:
+            home = serializer.validated_data['home_location']
+            try:
+                leg_quote = quote_doorstep_leg(
+                    pickup_city=point.city, home_city=home['city'],
+                    pickup_latitude=point.latitude, pickup_longitude=point.longitude,
+                    home_latitude=home['latitude'], home_longitude=home['longitude'],
+                )
+            except DoorstepQuoteError as error:
+                raise ValidationError({'home_location_token': str(error)}) from error
+            quote_payload['doorstep_delivery_cost'] = leg_quote.fee
+            quote_payload['doorstep_distance_meters'] = leg_quote.distance_meters
+            quote_payload['shipping_cost'] += leg_quote.fee
+            quote_payload['total_amount'] += leg_quote.fee
+            quote_payload['expected_doorstep_quote_token'] = sign_doorstep_quote(
+                quote=leg_quote, pickup_point=point, user_id=request.user.pk,
+                location_token=serializer.validated_data['home_location_token'],
+            )
+        return Response(quote_payload)
 
 
 class CheckoutView(generics.GenericAPIView):
-    serializer_class = CreateCheckoutSerializer
+    serializer_class = ConfirmCheckoutSerializer
     permission_classes = [IsAuthenticated, IsBuyer]
 
     def post(self, request, *args, **kwargs):
@@ -228,6 +301,28 @@ class CheckoutView(generics.GenericAPIView):
 
         try:
             with transaction.atomic():
+                pickup_point = serializer.validated_data.get('pickup_point')
+                doorstep_quote = None
+                if pickup_point:
+                    pickup_point = PickupPoint.objects.select_for_update().filter(pk=pickup_point.pk, active=True).first()
+                    if pickup_point is None:
+                        raise ValidationError({'pickup_point_id': 'This pickup point is no longer available. Refresh your quote.'})
+                    if serializer.validated_data['delivery_method'] == DeliveryMethod.PICKUP_POINT:
+                        serializer.validated_data['shipping_address'] = pickup_point.address
+                    serializer.validated_data['shipping_city'] = pickup_point.city
+                    serializer.validated_data['shipping_postal_code'] = (
+                        pickup_point.postal_code or 'N/A'
+                        if serializer.validated_data['delivery_method'] == DeliveryMethod.PICKUP_POINT else 'N/A'
+                    )
+                    if serializer.validated_data['delivery_method'] == DeliveryMethod.DOORSTEP:
+                        try:
+                            doorstep_quote = read_doorstep_quote(
+                                serializer.validated_data['expected_doorstep_quote_token'],
+                                pickup_point=pickup_point, user_id=buyer.pk,
+                                location_token=serializer.validated_data['home_location_token'],
+                            )
+                        except DoorstepQuoteError as error:
+                            raise ValidationError({'quote': str(error)}) from error
                 product_ids = [item.product.id for item in cart_items]
                 products_locked = {
                     product.id: product
@@ -256,6 +351,22 @@ class CheckoutView(generics.GenericAPIView):
                 except ShippingQuoteError as error:
                     raise ValidationError({'shipping_city': str(error)}) from error
                 quote_totals = _shipping_quote_payload(quotes)
+                if doorstep_quote is not None:
+                    quote_totals['shipping_cost'] += doorstep_quote.fee
+                    quote_totals['total_amount'] += doorstep_quote.fee
+                if any(
+                    serializer.validated_data[expected_field] != quote_totals[actual_field]
+                    for expected_field, actual_field in (
+                        ('expected_item_subtotal', 'item_subtotal'),
+                        ('expected_shipping_cost', 'shipping_cost'),
+                        ('expected_total_amount', 'total_amount'),
+                    )
+                ):
+                    raise ValidationError({
+                        'quote': 'The item or delivery price changed. Refresh the quote and review the new total before placing the order.',
+                    })
+                if pickup_point and serializer.validated_data['expected_pickup_point_address'] != pickup_point.address:
+                    raise ValidationError({'quote': 'The pickup point changed. Refresh the quote and review the destination before placing the order.'})
 
                 order = Order.objects.create(
                     buyer=buyer,
@@ -269,11 +380,29 @@ class CheckoutView(generics.GenericAPIView):
                     payment_option=payment_option,
                     amount_paid=quote_totals['total_amount'] if payment_method == PaymentMethod.WALLET else Decimal('0.00'),
                     delivery_fee_paid=payment_method == PaymentMethod.WALLET,
+                    delivery_method=serializer.validated_data['delivery_method'],
+                    pickup_point=pickup_point,
                     shipping_address=serializer.validated_data['shipping_address'],
                     shipping_city=serializer.validated_data['shipping_city'],
                     shipping_postal_code=serializer.validated_data['shipping_postal_code'],
                     shipping_country=serializer.validated_data['shipping_country'],
                 )
+
+                if doorstep_quote is not None:
+                    home = serializer.validated_data['home_location']
+                    home_leg = HomeDeliveryLeg.objects.create(
+                        order=order, pickup_point=pickup_point,
+                        pickup_address_snapshot=pickup_point.address,
+                        destination_address=home['address'], destination_city=home['city'],
+                        delivery_instructions=serializer.validated_data.get('home_delivery_instructions', ''),
+                        destination_latitude=Decimal(home['latitude']),
+                        destination_longitude=Decimal(home['longitude']),
+                        distance_meters=doorstep_quote.distance_meters,
+                        fee=doorstep_quote.fee,
+                    )
+                    HomeDeliveryEvent.objects.create(
+                        leg=home_leg, stage=HomeDeliveryStage.WAITING_FOR_PARCELS,
+                    )
 
                 if payment_method == PaymentMethod.WALLET:
                     wallet, _ = Wallet.objects.select_for_update().get_or_create(
@@ -310,6 +439,13 @@ class CheckoutView(generics.GenericAPIView):
                             else SettlementStatus.PENDING
                         ),
                     )
+                    ShipmentEvent.objects.create(
+                        fulfillment=fulfillments[seller_id], stage=ShipmentStage.ORDER_CREATED, source='system',
+                    )
+                    if payment_method == PaymentMethod.WALLET:
+                        ShipmentEvent.objects.create(
+                            fulfillment=fulfillments[seller_id], stage=ShipmentStage.PAYMENT_CONFIRMED, source='system',
+                        )
 
                 sellers = set()
                 for cart_item in cart_items:
@@ -381,6 +517,10 @@ class CheckoutView(generics.GenericAPIView):
                         seller,
                         title='New order received',
                         message=(
+                            (f'You have a new paid order ({order.id}) ready for fulfillment. '
+                             f'Logistics will collect from your dispatch location for {pickup_point.name}, '
+                             f'{order.shipping_address}, {order.shipping_city}.')
+                            if payment_method == PaymentMethod.WALLET and pickup_point else
                             f'You have a new paid order ({order.id}) ready for fulfillment.'
                             if payment_method == PaymentMethod.WALLET
                             else f'You have a new order ({order.id}) awaiting payment confirmation.'
@@ -411,20 +551,20 @@ class OrderDetailView(generics.RetrieveAPIView):
     lookup_field = 'pk'
 
     def get_queryset(self):
-        return Order.objects.filter(buyer=self.request.user).prefetch_related('items')
+        return Order.objects.filter(buyer=self.request.user).prefetch_related('items', 'fulfillments__events')
 
 
 class OrderListView(generics.ListAPIView):
-    serializer_class = OrderDetailSerializer
+    serializer_class = OrderListSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return Order.objects.filter(buyer=self.request.user).prefetch_related('items').order_by('-created_at')
+        return Order.objects.filter(buyer=self.request.user).prefetch_related('items', 'fulfillments').order_by('-created_at')
 
 
 class SellerOrderListView(generics.ListAPIView):
     """Lists all orders that contain items sold by the requesting seller."""
-    serializer_class = SellerOrderDetailSerializer
+    serializer_class = SellerOrderListSerializer
     permission_classes = [IsSeller, IsVerifiedUser]
 
     def get_queryset(self):
@@ -497,6 +637,11 @@ class SellerOrderStatusUpdateView(generics.GenericAPIView):
                 fulfillment.save(update_fields=[
                     'status', 'courier_name', 'tracking_number', 'shipped_at', 'updated_at',
                 ])
+                ShipmentEvent.objects.create(
+                    fulfillment=fulfillment,
+                    stage=ShipmentStage.AWAITING_COLLECTION if order.pickup_point_id else ShipmentStage.SHIPPED,
+                    actor=request.user, source='seller',
+                )
             else:
                 cancelled_total = fulfillment.shipping_cost + fulfillment.item_subtotal
                 refundable_amount = fulfillment.shipping_cost + (
@@ -586,6 +731,10 @@ class SellerOrderStatusUpdateView(generics.GenericAPIView):
                 fulfillment.status = OrderStatus.CANCELLED
                 fulfillment.settlement_status = SettlementStatus.REVERSED
                 fulfillment.save(update_fields=['status', 'settlement_status', 'updated_at'])
+                ShipmentEvent.objects.create(
+                    fulfillment=fulfillment, stage=ShipmentStage.CANCELLED,
+                    actor=request.user, source='seller',
+                )
                 record_ledger_entry(
                     order=order,
                     user=request.user,
@@ -603,6 +752,45 @@ class SellerOrderStatusUpdateView(generics.GenericAPIView):
 
             fulfillment_states = list(order.fulfillments.values_list('status', flat=True))
             active_states = [value for value in fulfillment_states if value != OrderStatus.CANCELLED]
+            if not active_states and order.delivery_method == DeliveryMethod.DOORSTEP:
+                home_leg = HomeDeliveryLeg.objects.select_for_update().filter(order=order).first()
+                if home_leg and home_leg.status != HomeDeliveryStage.CANCELLED:
+                    home_refund = min(home_leg.fee, order.amount_paid)
+                    if home_refund > 0:
+                        if order.payment_method == PaymentMethod.WALLET:
+                            try:
+                                buyer_wallet = Wallet.objects.get(user=order.buyer, currency=order.currency)
+                                release_escrow_hold(
+                                    buyer_wallet, home_refund,
+                                    f'order:{order.pk}:home-leg:buyer-refund',
+                                )
+                            except (Wallet.DoesNotExist, WalletOperationError) as error:
+                                raise ValidationError({'payment': str(error)}) from error
+                        else:
+                            buyer_wallet, _ = Wallet.objects.get_or_create(user=order.buyer, currency=order.currency)
+                            try:
+                                credit_wallet(
+                                    buyer_wallet, home_refund,
+                                    f'order:{order.pk}:home-leg:refund-credit',
+                                    WalletTransactionType.REFUND, WalletBalanceSource.SHOPPING,
+                                )
+                            except WalletOperationError as error:
+                                raise ValidationError({'payment': str(error)}) from error
+                        record_ledger_entry(
+                            order=order, user=order.buyer, entry_type=LedgerEntryType.REFUND_COMPLETED,
+                            amount=home_refund, reference=f'order:{order.pk}:home-leg:refund-completed',
+                            metadata={'provider': order.payment_method, 'destination': 'shopping_wallet'},
+                        )
+                        refund_credited = True
+                    order.shipping_cost = max(Decimal('0.00'), order.shipping_cost - home_leg.fee)
+                    order.total_amount = max(Decimal('0.00'), order.total_amount - home_leg.fee)
+                    order.amount_paid = max(Decimal('0.00'), order.amount_paid - home_refund)
+                    refundable_amount += home_refund
+                    home_leg.status = HomeDeliveryStage.CANCELLED
+                    home_leg.save(update_fields=['status'])
+                    HomeDeliveryEvent.objects.create(
+                        leg=home_leg, stage=HomeDeliveryStage.CANCELLED, actor=request.user,
+                    )
             if not active_states:
                 order.status = OrderStatus.CANCELLED
                 order.payment_status = PaymentStatus.REFUNDED
@@ -669,6 +857,193 @@ class SellerOrderStatusView(SellerOrderStatusUpdateView):
     serializer_class = OrderStatusUpdateSerializer
 
 
+class LogisticsPickupEventView(generics.GenericAPIView):
+    """Record verified first-leg milestones without assuming physical movement."""
+    serializer_class = LogisticsEventInputSerializer
+    permission_classes = [IsLogistics]
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        stage = serializer.validated_data['stage']
+        previous_stage = {
+            ShipmentStage.COLLECTED_FROM_SELLER: ShipmentStage.AWAITING_COLLECTION,
+            ShipmentStage.IN_TRANSIT: ShipmentStage.COLLECTED_FROM_SELLER,
+            ShipmentStage.ARRIVED_AT_PICKUP: ShipmentStage.IN_TRANSIT,
+        }[stage]
+        with transaction.atomic():
+            fulfillment = get_object_or_404(
+                OrderFulfillment.objects.select_for_update().select_related('order'), pk=kwargs['pk'],
+            )
+            if not fulfillment.order.pickup_point_id or fulfillment.status != OrderStatus.SHIPPED:
+                raise ValidationError({'stage': 'This is not an active pickup-point shipment.'})
+            if not request.user.is_super_admin and fulfillment.assigned_logistics_id != request.user.pk:
+                raise PermissionDenied('This shipment is not assigned to you.')
+            stages = set(fulfillment.events.values_list('stage', flat=True))
+            if stage in stages:
+                return Response({'stage': stage, 'already_recorded': True})
+            if previous_stage not in stages:
+                raise ValidationError({'stage': 'Record the preceding shipment milestone first.'})
+            event = ShipmentEvent.objects.create(
+                fulfillment=fulfillment, stage=stage, actor=request.user,
+                source='logistics', note=serializer.validated_data.get('note', ''),
+            )
+        return Response({'id': event.id, 'stage': event.stage, 'created_at': event.created_at}, status=status.HTTP_201_CREATED)
+
+
+class LogisticsShipmentPagination(LimitOffsetPagination):
+    default_limit = 30
+    max_limit = 100
+
+
+class LogisticsShipmentListView(generics.ListAPIView):
+    serializer_class = LogisticsShipmentSerializer
+    permission_classes = [IsLogistics]
+    pagination_class = LogisticsShipmentPagination
+
+    def get_queryset(self):
+        queryset = OrderFulfillment.objects.filter(
+            order__pickup_point__isnull=False,
+            status__in=[OrderStatus.PROCESSING, OrderStatus.SHIPPED],
+        ).select_related('order__pickup_point', 'order__home_delivery', 'seller__store').prefetch_related('events').order_by('-created_at')
+        if not self.request.user.is_super_admin:
+            queryset = queryset.filter(assigned_logistics=self.request.user)
+        return queryset
+
+
+class LogisticsAssignmentView(generics.GenericAPIView):
+    serializer_class = LogisticsAssignmentInputSerializer
+    permission_classes = [IsSuperAdmin]
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        with transaction.atomic():
+            fulfillment = get_object_or_404(
+                OrderFulfillment.objects.select_for_update().select_related('order'), pk=kwargs['pk'],
+            )
+            if not fulfillment.order.pickup_point_id or fulfillment.status in {OrderStatus.CANCELLED, OrderStatus.DELIVERED}:
+                raise ValidationError({'fulfillment': 'Only active pickup-point shipments can be assigned.'})
+            matches = list(get_user_model().objects.filter(
+                email__iexact=serializer.validated_data['email'], is_active=True,
+            ).order_by('date_joined')[:2])
+            if len(matches) != 1:
+                raise ValidationError({'email': 'Enter the email of one active logistics staff account.'})
+            assignee = matches[0]
+            if not assignee.staff_role_assignments.filter(role=StaffRole.LOGISTICS).exists():
+                raise ValidationError({'email': 'Assign the logistics staff role before assigning a shipment.'})
+            previous_id = fulfillment.assigned_logistics_id
+            if previous_id != assignee.pk:
+                fulfillment.assigned_logistics = assignee
+                fulfillment.save(update_fields=['assigned_logistics', 'updated_at'])
+                AdminAuditLog.objects.create(
+                    actor=request.user, action='shipment_logistics_assigned',
+                    target_type='order_fulfillment', target_id=str(fulfillment.pk),
+                    reason=serializer.validated_data['reason'],
+                    metadata={'previous_assignee_id': str(previous_id) if previous_id else '', 'assignee_id': str(assignee.pk)},
+                )
+        return Response({'fulfillment_id': fulfillment.pk, 'assigned_logistics_id': assignee.pk})
+
+
+class RiderHomeDeliveryListView(generics.ListAPIView):
+    serializer_class = RiderHomeDeliverySerializer
+    permission_classes = [IsLogistics]
+    pagination_class = LogisticsShipmentPagination
+
+    def get_queryset(self):
+        queryset = HomeDeliveryLeg.objects.filter(order__delivery_fee_paid=True).exclude(
+            status__in=[HomeDeliveryStage.CANCELLED, HomeDeliveryStage.BUYER_CONFIRMED],
+        ).select_related('order__buyer', 'pickup_point').prefetch_related('events').order_by('-created_at')
+        if not self.request.user.is_super_admin:
+            queryset = queryset.filter(assigned_rider=self.request.user)
+        return queryset
+
+
+class RiderHomeDeliveryAssignmentView(generics.GenericAPIView):
+    serializer_class = LogisticsAssignmentInputSerializer
+    permission_classes = [IsSuperAdmin]
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        with transaction.atomic():
+            leg = get_object_or_404(HomeDeliveryLeg.objects.select_for_update().select_related('order'),
+                                    order_id=kwargs['pk'])
+            if leg.status != HomeDeliveryStage.WAITING_FOR_PARCELS or leg.order.status in {OrderStatus.CANCELLED, OrderStatus.DELIVERED}:
+                raise ValidationError({'status': 'Only active, unassigned home deliveries can be assigned.'})
+            if not leg.order.delivery_fee_paid:
+                raise ValidationError({'payment': 'Wait for confirmed delivery payment before assigning a rider.'})
+            matches = list(get_user_model().objects.filter(
+                email__iexact=serializer.validated_data['email'], is_active=True,
+            ).order_by('date_joined')[:2])
+            if len(matches) != 1 or not matches[0].staff_role_assignments.filter(role=StaffRole.LOGISTICS).exists():
+                raise ValidationError({'email': 'Choose one active logistics staff account.'})
+            rider = matches[0]
+            leg.assigned_rider = rider
+            leg.status = HomeDeliveryStage.RIDER_ASSIGNED
+            leg.save(update_fields=['assigned_rider', 'status'])
+            HomeDeliveryEvent.objects.create(leg=leg, stage=HomeDeliveryStage.RIDER_ASSIGNED, actor=request.user)
+            AdminAuditLog.objects.create(
+                actor=request.user, action='home_delivery_rider_assigned',
+                target_type='home_delivery_leg', target_id=str(leg.order_id),
+                reason=serializer.validated_data['reason'],
+                metadata={'assignee_id': str(rider.pk)},
+            )
+        return Response({'order_id': leg.order_id, 'assigned_rider_id': rider.pk})
+
+
+class RiderHomeDeliveryEventView(generics.GenericAPIView):
+    serializer_class = RiderHomeDeliveryEventInputSerializer
+    permission_classes = [IsLogistics]
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        stage = serializer.validated_data['stage']
+        preceding = {
+            HomeDeliveryStage.RIDER_ACCEPTED: HomeDeliveryStage.RIDER_ASSIGNED,
+            HomeDeliveryStage.COLLECTED_FROM_PICKUP: HomeDeliveryStage.RIDER_ACCEPTED,
+            HomeDeliveryStage.RIDER_DELIVERED: HomeDeliveryStage.COLLECTED_FROM_PICKUP,
+        }[stage]
+        with transaction.atomic():
+            leg = get_object_or_404(HomeDeliveryLeg.objects.select_for_update().select_related('order'),
+                                    order_id=kwargs['pk'])
+            if leg.assigned_rider_id != request.user.pk:
+                raise PermissionDenied('This home delivery is not assigned to you.')
+            if not leg.order.delivery_fee_paid:
+                raise ValidationError({'payment': 'Wait for confirmed delivery payment before updating this delivery.'})
+            if leg.status == stage:
+                return Response({'stage': stage, 'already_recorded': True})
+            if leg.status != preceding or leg.order.status in {OrderStatus.CANCELLED, OrderStatus.DELIVERED}:
+                raise ValidationError({'stage': 'Complete the preceding delivery milestone first.'})
+            if stage == HomeDeliveryStage.COLLECTED_FROM_PICKUP:
+                active = OrderFulfillment.objects.filter(order=leg.order).exclude(status=OrderStatus.CANCELLED)
+                if not active.exists() or any(
+                    not fulfillment.events.filter(stage=ShipmentStage.ARRIVED_AT_PICKUP).exists()
+                    for fulfillment in active
+                ):
+                    raise ValidationError({'stage': 'All parcels must arrive at the pickup point first.'})
+            leg.status = stage
+            leg.save(update_fields=['status'])
+            event = HomeDeliveryEvent.objects.create(
+                leg=leg, stage=stage, actor=request.user,
+                note=serializer.validated_data.get('note', ''),
+            )
+            if stage in {HomeDeliveryStage.COLLECTED_FROM_PICKUP, HomeDeliveryStage.RIDER_DELIVERED}:
+                create_notification(
+                    leg.order.buyer,
+                    title='Doorstep delivery update',
+                    message=(
+                        'Your parcel is out for doorstep delivery.' if stage == HomeDeliveryStage.COLLECTED_FROM_PICKUP
+                        else 'The rider reported delivery. Confirm receipt in your order details after checking your parcel.'
+                    ),
+                    notification_type=NotificationType.ORDER,
+                    email_preference='email_order_updates',
+                    action_path=f'/account/orders/{leg.order_id}',
+                )
+        return Response({'id': event.id, 'stage': event.stage, 'created_at': event.created_at}, status=status.HTTP_201_CREATED)
+
+
 class OrderDeliveryConfirmationView(generics.GenericAPIView):
     serializer_class = OrderDetailSerializer
     permission_classes = [IsAuthenticated]
@@ -692,6 +1067,16 @@ class OrderDeliveryConfirmationView(generics.GenericAPIView):
                     status=OrderStatus.CANCELLED,
                 ).select_related('seller')
             )
+            if order.pickup_point_id and any(
+                not fulfillment.events.filter(stage=ShipmentStage.ARRIVED_AT_PICKUP).exists()
+                for fulfillment in fulfillments
+            ):
+                raise ValidationError({'status': 'All parcels must be recorded at the pickup point before collection can be confirmed.'})
+            home_leg = None
+            if order.delivery_method == DeliveryMethod.DOORSTEP:
+                home_leg = HomeDeliveryLeg.objects.select_for_update().filter(order=order).first()
+                if home_leg is None or home_leg.status != HomeDeliveryStage.RIDER_DELIVERED:
+                    raise ValidationError({'status': 'Wait for the rider to report doorstep delivery before confirming.'})
             try:
                 buyer_wallet = None
                 if order.payment_method == PaymentMethod.WALLET:
@@ -742,6 +1127,11 @@ class OrderDeliveryConfirmationView(generics.GenericAPIView):
                     fulfillment.status = OrderStatus.DELIVERED
                     fulfillment.settlement_status = SettlementStatus.RELEASED
                     fulfillment.save(update_fields=['status', 'settlement_status', 'updated_at'])
+                    ShipmentEvent.objects.create(
+                        fulfillment=fulfillment,
+                        stage=ShipmentStage.COLLECTED_BY_BUYER if order.delivery_method == DeliveryMethod.PICKUP_POINT else ShipmentStage.DELIVERED,
+                        actor=request.user, source='buyer',
+                    )
                     create_notification(
                         fulfillment.seller,
                         title='Seller earnings released',
@@ -757,10 +1147,18 @@ class OrderDeliveryConfirmationView(generics.GenericAPIView):
                         (item.shipping_cost + item.commission_amount for item in fulfillments),
                         Decimal('0.00'),
                     )
+                    if home_leg is not None:
+                        platform_amount += home_leg.fee
                     capture_escrow_hold(
                         buyer_wallet,
                         platform_amount,
                         f'order:{order.pk}:platform-capture',
+                    )
+                if home_leg is not None:
+                    home_leg.status = HomeDeliveryStage.BUYER_CONFIRMED
+                    home_leg.save(update_fields=['status'])
+                    HomeDeliveryEvent.objects.create(
+                        leg=home_leg, stage=HomeDeliveryStage.BUYER_CONFIRMED, actor=request.user,
                     )
             except (Wallet.DoesNotExist, WalletOperationError) as error:
                 raise ValidationError({'payment': str(error)}) from error

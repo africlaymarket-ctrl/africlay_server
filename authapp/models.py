@@ -43,6 +43,7 @@ def required_policy_codes(role):
 class StaffRole(models.TextChoices):
     SALES_REVIEWER = 'sales_reviewer', 'Sales reviewer'
     FINANCE = 'finance', 'Finance'
+    LOGISTICS = 'logistics', 'Logistics'
 
 
 class DashboardAccessRequestStatus(models.TextChoices):

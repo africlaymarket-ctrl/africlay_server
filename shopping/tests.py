@@ -2,7 +2,7 @@ from django.contrib.auth import get_user_model
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from decimal import Decimal
 
 from authapp.models import UserRole
@@ -13,6 +13,7 @@ from store_management.models import Store
 from payments.models import Wallet, WalletTransaction
 from payments.services import credit_wallet, hold_mpesa_seller_proceeds
 from notifications.models import Notification, NotificationType
+from .test_support import QuotedCheckoutClient
 
 
 User = get_user_model()
@@ -20,7 +21,7 @@ User = get_user_model()
 
 class CartApiTests(TestCase):
     def setUp(self):
-        self.client = APIClient()
+        self.client = QuotedCheckoutClient()
         self.buyer = User.objects.create_user(
             email='buyer@example.com',
             password='StrongPassword123!',
@@ -256,9 +257,10 @@ class CartApiTests(TestCase):
         self.assertEqual(float(price), 1000.00)
 
 
+@override_settings(PICKUP_ONLY_CHECKOUT=False)
 class CheckoutApiTests(TestCase):
     def setUp(self):
-        self.client = APIClient()
+        self.client = QuotedCheckoutClient()
         self.buyer = User.objects.create_user(
             email='buyer@example.com',
             password='StrongPassword123!',
@@ -963,9 +965,10 @@ class CheckoutApiTests(TestCase):
         self.assertEqual(float(items[0]['price_at_purchase']), 1000.00)
 
 
+@override_settings(PICKUP_ONLY_CHECKOUT=False)
 class SellerOrderApiTests(TestCase):
     def setUp(self):
-        self.client = APIClient()
+        self.client = QuotedCheckoutClient()
         self.buyer = User.objects.create_user(
             email='buyer@example.com', password='StrongPassword123!',
             role=UserRole.BUYER, is_verified=True,

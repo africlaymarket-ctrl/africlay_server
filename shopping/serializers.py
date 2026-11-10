@@ -1,15 +1,32 @@
 from decimal import Decimal
 
+from django.conf import settings
 from rest_framework import serializers
 
+from .locations import LocationError, read_home_location
+
 from .models import (
-    Cart, CartItem, Order, OrderFulfillment, OrderItem, OrderStatus, PaymentMethod,
-    PaymentOption, Wishlist, WishlistItem,
+    Cart, CartItem, DeliveryMethod, Order, OrderFulfillment, OrderItem, OrderStatus, PaymentMethod, PickupPoint,
+    PaymentOption, ShipmentEvent, ShipmentStage, Wishlist, WishlistItem,
+    HomeDeliveryLeg, HomeDeliveryEvent, HomeDeliveryStage,
 )
 
 
 class SupportedShippingTownListSerializer(serializers.Serializer):
     towns = serializers.ListField(child=serializers.CharField(), read_only=True)
+
+
+class PickupPointSerializer(serializers.ModelSerializer):
+    doorstep_available = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PickupPoint
+        fields = ['id', 'name', 'city', 'address', 'postal_code', 'doorstep_available']
+        read_only_fields = fields
+
+    def get_doorstep_available(self, point):
+        return bool(settings.DOORSTEP_CHECKOUT_ENABLED and settings.GEOAPIFY_API_KEY
+                    and point.active and point.latitude is not None and point.longitude is not None)
 
 
 class CartItemSerializer(serializers.ModelSerializer):
@@ -57,8 +74,104 @@ class SellerOrderItemDetailSerializer(OrderItemDetailSerializer):
         read_only_fields = fields
 
 
+class ShipmentEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ShipmentEvent
+        fields = ['id', 'stage', 'source', 'note', 'created_at']
+        read_only_fields = fields
+
+
+class HomeDeliveryEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = HomeDeliveryEvent
+        fields = ['id', 'stage', 'note', 'created_at']
+        read_only_fields = fields
+
+
+class HomeDeliveryLegSerializer(serializers.ModelSerializer):
+    events = HomeDeliveryEventSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = HomeDeliveryLeg
+        fields = ['status', 'pickup_address_snapshot', 'destination_address', 'destination_city', 'delivery_instructions', 'distance_meters', 'fee', 'events']
+        read_only_fields = fields
+
+
+class RiderHomeDeliverySerializer(HomeDeliveryLegSerializer):
+    order_id = serializers.UUIDField(source='order.id', read_only=True)
+    pickup_point = PickupPointSerializer(read_only=True)
+    buyer_phone = serializers.CharField(source='order.buyer.phone_number', read_only=True)
+
+    class Meta(HomeDeliveryLegSerializer.Meta):
+        fields = HomeDeliveryLegSerializer.Meta.fields + ['order_id', 'pickup_point', 'assigned_rider_id', 'buyer_phone', 'created_at']
+        read_only_fields = fields
+
+
+class RiderHomeDeliveryEventInputSerializer(serializers.Serializer):
+    stage = serializers.ChoiceField(choices=[
+        HomeDeliveryStage.RIDER_ACCEPTED, HomeDeliveryStage.COLLECTED_FROM_PICKUP,
+        HomeDeliveryStage.RIDER_DELIVERED,
+    ])
+    note = serializers.CharField(required=False, allow_blank=True, max_length=255)
+
+
+class LogisticsEventInputSerializer(serializers.Serializer):
+    stage = serializers.ChoiceField(choices=[
+        ShipmentStage.COLLECTED_FROM_SELLER,
+        ShipmentStage.IN_TRANSIT,
+        ShipmentStage.ARRIVED_AT_PICKUP,
+    ])
+    note = serializers.CharField(required=False, allow_blank=True, max_length=255)
+
+
+class LogisticsAssignmentInputSerializer(serializers.Serializer):
+    email = serializers.EmailField(required=True)
+    reason = serializers.CharField(required=True, min_length=5, max_length=255)
+
+
+class LogisticsShipmentSerializer(serializers.ModelSerializer):
+    order_id = serializers.UUIDField(source='order.id', read_only=True)
+    assigned_logistics_id = serializers.UUIDField(read_only=True)
+    pickup_point = PickupPointSerializer(source='order.pickup_point', read_only=True)
+    pickup_address = serializers.SerializerMethodField()
+    pickup_city = serializers.CharField(source='order.shipping_city', read_only=True)
+    seller_store_name = serializers.SerializerMethodField()
+    seller_store_address = serializers.SerializerMethodField()
+    seller_store_phone = serializers.SerializerMethodField()
+    events = ShipmentEventSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = OrderFulfillment
+        fields = [
+            'id', 'order_id', 'status', 'origin_city', 'pickup_point', 'pickup_address', 'pickup_city',
+            'courier_name', 'tracking_number', 'seller_store_name',
+            'seller_store_address', 'seller_store_phone', 'events',
+            'assigned_logistics_id', 'created_at',
+        ]
+        read_only_fields = fields
+
+    def _store(self, fulfillment):
+        return getattr(fulfillment.seller, 'store', None)
+
+    def get_pickup_address(self, fulfillment):
+        if fulfillment.order.delivery_method == DeliveryMethod.DOORSTEP:
+            leg = getattr(fulfillment.order, 'home_delivery', None)
+            return leg.pickup_address_snapshot if leg else ''
+        return fulfillment.order.shipping_address
+
+    def get_seller_store_name(self, fulfillment):
+        return getattr(self._store(fulfillment), 'name', '')
+
+    def get_seller_store_address(self, fulfillment):
+        return getattr(self._store(fulfillment), 'address', '')
+
+    def get_seller_store_phone(self, fulfillment):
+        return getattr(self._store(fulfillment), 'phone_number', '')
+
+
 class OrderFulfillmentSerializer(serializers.ModelSerializer):
     seller_id = serializers.UUIDField(source='seller.id', read_only=True)
+    events = ShipmentEventSerializer(many=True, read_only=True)
 
     class Meta:
         model = OrderFulfillment
@@ -67,13 +180,20 @@ class OrderFulfillmentSerializer(serializers.ModelSerializer):
             'seller_proceeds', 'shipping_cost', 'actual_weight_kg',
             'volumetric_weight_kg', 'chargeable_weight_kg', 'origin_city',
             'origin_region', 'destination_city', 'destination_region', 'courier_name',
-            'tracking_number', 'shipped_at', 'settlement_status',
+            'tracking_number', 'shipped_at', 'settlement_status', 'events',
         ]
+        read_only_fields = fields
+
+
+class OrderFulfillmentSummarySerializer(OrderFulfillmentSerializer):
+    class Meta(OrderFulfillmentSerializer.Meta):
+        fields = [field for field in OrderFulfillmentSerializer.Meta.fields if field != 'events']
         read_only_fields = fields
 
 
 class BuyerOrderFulfillmentSerializer(serializers.ModelSerializer):
     seller_id = serializers.UUIDField(source='seller.id', read_only=True)
+    events = ShipmentEventSerializer(many=True, read_only=True)
 
     class Meta:
         model = OrderFulfillment
@@ -81,8 +201,14 @@ class BuyerOrderFulfillmentSerializer(serializers.ModelSerializer):
             'id', 'seller_id', 'status', 'shipping_cost', 'actual_weight_kg',
             'volumetric_weight_kg', 'chargeable_weight_kg', 'origin_city',
             'destination_city', 'courier_name', 'tracking_number', 'shipped_at',
-            'settlement_status',
+            'settlement_status', 'events',
         ]
+        read_only_fields = fields
+
+
+class BuyerOrderFulfillmentSummarySerializer(BuyerOrderFulfillmentSerializer):
+    class Meta(BuyerOrderFulfillmentSerializer.Meta):
+        fields = [field for field in BuyerOrderFulfillmentSerializer.Meta.fields if field != 'events']
         read_only_fields = fields
 
 
@@ -91,18 +217,24 @@ class OrderDetailSerializer(serializers.ModelSerializer):
     items = OrderItemDetailSerializer(many=True, read_only=True)
     fulfillments = BuyerOrderFulfillmentSerializer(many=True, read_only=True)
     amount_due = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    pickup_point = PickupPointSerializer(read_only=True)
+    home_delivery = HomeDeliveryLegSerializer(read_only=True)
 
     class Meta:
         model = Order
         fields = [
             'id', 'buyer_id', 'item_subtotal', 'shipping_cost', 'total_amount', 'currency',
             'status', 'payment_method', 'payment_status', 'payment_option', 'amount_paid',
-            'amount_due', 'delivery_fee_paid',
+            'amount_due', 'delivery_fee_paid', 'delivery_method', 'pickup_point', 'home_delivery',
             'shipping_address', 'shipping_city', 'shipping_postal_code', 'shipping_country',
             'courier_name', 'tracking_number', 'shipped_at',
             'items', 'fulfillments', 'created_at', 'updated_at'
         ]
         read_only_fields = fields
+
+
+class OrderListSerializer(OrderDetailSerializer):
+    fulfillments = BuyerOrderFulfillmentSummarySerializer(many=True, read_only=True)
 
 
 class SellerOrderDetailSerializer(OrderDetailSerializer):
@@ -117,6 +249,8 @@ class SellerOrderDetailSerializer(OrderDetailSerializer):
     commission_amount = serializers.SerializerMethodField()
     seller_proceeds = serializers.SerializerMethodField()
     settlement_status = serializers.SerializerMethodField()
+    home_delivery = serializers.SerializerMethodField()
+    shipping_address = serializers.SerializerMethodField()
 
     class Meta(OrderDetailSerializer.Meta):
         fields = OrderDetailSerializer.Meta.fields + [
@@ -125,6 +259,15 @@ class SellerOrderDetailSerializer(OrderDetailSerializer):
 
     def _fulfillment(self, order):
         return order.fulfillments.filter(seller=self.context['request'].user).first()
+
+    def get_home_delivery(self, order):
+        return None
+
+    def get_shipping_address(self, order):
+        if order.delivery_method == DeliveryMethod.DOORSTEP:
+            leg = getattr(order, 'home_delivery', None)
+            return leg.pickup_address_snapshot if leg else ''
+        return order.shipping_address
 
     def get_total_amount(self, order):
         fulfillment = self._fulfillment(order)
@@ -172,15 +315,25 @@ class SellerOrderDetailSerializer(OrderDetailSerializer):
         return fulfillment.settlement_status if fulfillment else 'pending'
 
 
+class SellerOrderListSerializer(SellerOrderDetailSerializer):
+    def get_fulfillments(self, order):
+        fulfillment = self._fulfillment(order)
+        return OrderFulfillmentSummarySerializer([fulfillment] if fulfillment else [], many=True).data
+
+
 class SellerOrderStatusSerializer(serializers.Serializer):
     status = serializers.ChoiceField(choices=['processing', 'shipped', 'delivered'])
 
 
 class CreateCheckoutSerializer(serializers.Serializer):
-    shipping_address = serializers.CharField(required=True, max_length=500)
-    shipping_city = serializers.CharField(required=True, max_length=100)
-    shipping_postal_code = serializers.CharField(required=True, max_length=20)
-    shipping_country = serializers.CharField(required=True, max_length=100)
+    shipping_address = serializers.CharField(required=False, max_length=500)
+    shipping_city = serializers.CharField(required=False, max_length=100)
+    shipping_postal_code = serializers.CharField(required=False, max_length=20)
+    shipping_country = serializers.CharField(required=False, max_length=100)
+    delivery_method = serializers.ChoiceField(choices=DeliveryMethod.choices, required=False, default=DeliveryMethod.STANDARD)
+    pickup_point_id = serializers.UUIDField(required=False)
+    home_location_token = serializers.CharField(required=False, max_length=2048)
+    home_delivery_instructions = serializers.CharField(required=False, allow_blank=True, max_length=255)
     payment_method = serializers.ChoiceField(
         choices=[PaymentMethod.MPESA, PaymentMethod.WALLET],
         required=False,
@@ -199,6 +352,42 @@ class CreateCheckoutSerializer(serializers.Serializer):
             raise serializers.ValidationError({
                 'buy_now_product_id': 'A product is required when a Buy Now quantity is provided.',
             })
+        if attrs['delivery_method'] in {DeliveryMethod.PICKUP_POINT, DeliveryMethod.DOORSTEP}:
+            point = PickupPoint.objects.filter(pk=attrs.get('pickup_point_id'), active=True).first()
+            if point is None:
+                raise serializers.ValidationError({'pickup_point_id': 'Select an available AfriClay pickup point.'})
+            attrs['pickup_point'] = point
+            attrs['shipping_city'] = point.city
+            attrs['shipping_postal_code'] = point.postal_code or 'N/A'
+            attrs['shipping_country'] = 'Kenya'
+            if attrs['delivery_method'] == DeliveryMethod.DOORSTEP:
+                if not settings.DOORSTEP_CHECKOUT_ENABLED:
+                    raise serializers.ValidationError({'delivery_method': 'Doorstep delivery is not available yet.'})
+                if point.latitude is None or point.longitude is None:
+                    raise serializers.ValidationError({'pickup_point_id': 'This pickup point has no confirmed map pin.'})
+                token = attrs.get('home_location_token')
+                if not token:
+                    raise serializers.ValidationError({'home_location_token': 'Choose a confirmed home location.'})
+                try:
+                    attrs['home_location'] = read_home_location(
+                        token, pickup_point=point, user_id=self.context['request'].user.pk,
+                    )
+                except LocationError as error:
+                    raise serializers.ValidationError({'home_location_token': str(error)}) from error
+                attrs['shipping_address'] = attrs['home_location']['address']
+                attrs['shipping_postal_code'] = 'N/A'
+            else:
+                if attrs.get('home_location_token'):
+                    raise serializers.ValidationError({'home_location_token': 'A home location is only valid for doorstep delivery.'})
+                attrs['shipping_address'] = point.address
+        else:
+            if settings.PICKUP_ONLY_CHECKOUT:
+                raise serializers.ValidationError({'delivery_method': 'New orders must use an AfriClay pickup point until doorstep pricing is available.'})
+            if attrs.get('pickup_point_id'):
+                raise serializers.ValidationError({'pickup_point_id': 'A pickup point is only valid for pickup delivery.'})
+            for field in ('shipping_address', 'shipping_city', 'shipping_postal_code', 'shipping_country'):
+                if not attrs.get(field):
+                    raise serializers.ValidationError({field: 'A delivery address is required.'})
         return attrs
 
     def validate_shipping_address(self, value):
@@ -228,6 +417,24 @@ class CreateCheckoutSerializer(serializers.Serializer):
         if len(value.strip()) < 2:
             raise serializers.ValidationError('Shipping country must be at least 2 characters.')
         return value
+
+
+class ConfirmCheckoutSerializer(CreateCheckoutSerializer):
+    """Checkout requires the prices the buyer reviewed in the shipping quote."""
+
+    expected_item_subtotal = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=0)
+    expected_shipping_cost = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=0)
+    expected_total_amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=0)
+    expected_pickup_point_address = serializers.CharField(required=False, max_length=500)
+    expected_doorstep_quote_token = serializers.CharField(required=False, max_length=4096)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        if attrs['delivery_method'] in {DeliveryMethod.PICKUP_POINT, DeliveryMethod.DOORSTEP} and not attrs.get('expected_pickup_point_address'):
+            raise serializers.ValidationError({'expected_pickup_point_address': 'Review the pickup point quote before placing the order.'})
+        if attrs['delivery_method'] == DeliveryMethod.DOORSTEP and not attrs.get('expected_doorstep_quote_token'):
+            raise serializers.ValidationError({'expected_doorstep_quote_token': 'Review the doorstep quote before placing the order.'})
+        return attrs
 
 
 class OrderStatusUpdateSerializer(serializers.ModelSerializer):

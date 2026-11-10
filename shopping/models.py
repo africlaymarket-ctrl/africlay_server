@@ -2,7 +2,8 @@ import uuid
 from decimal import Decimal
 
 from django.conf import settings
-from django.core.validators import MinValueValidator
+from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
 from core.models import TimestampedModel
@@ -63,6 +64,37 @@ class SettlementStatus(models.TextChoices):
     REVERSED = 'reversed', 'Reversed'
 
 
+class DeliveryMethod(models.TextChoices):
+    STANDARD = 'standard', 'Existing address delivery'
+    PICKUP_POINT = 'pickup_point', 'AfriClay pickup point'
+    DOORSTEP = 'doorstep', 'Pickup point to home'
+
+
+class PickupPoint(TimestampedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=120, unique=True)
+    city = models.CharField(max_length=100)
+    address = models.CharField(max_length=500)
+    postal_code = models.CharField(max_length=20, blank=True, default='')
+    # Administrators enter these only after checking the exact entrance/map pin.
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True,
+                                   validators=[MinValueValidator(-90), MaxValueValidator(90)])
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True,
+                                    validators=[MinValueValidator(-180), MaxValueValidator(180)])
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ['city', 'name']
+
+    def clean(self):
+        super().clean()
+        if (self.latitude is None) != (self.longitude is None):
+            raise ValidationError('Enter both latitude and longitude for a pickup point map pin.')
+
+    def __str__(self):
+        return f'{self.name} ({self.city})'
+
+
 class Order(TimestampedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     buyer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='orders')
@@ -75,6 +107,8 @@ class Order(TimestampedModel):
     payment_option = models.CharField(max_length=24, choices=PaymentOption.choices, default=PaymentOption.PAY_NOW)
     amount_paid = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
     delivery_fee_paid = models.BooleanField(default=False)
+    delivery_method = models.CharField(max_length=20, choices=DeliveryMethod.choices, default=DeliveryMethod.STANDARD)
+    pickup_point = models.ForeignKey(PickupPoint, on_delete=models.PROTECT, null=True, blank=True)
 
     # Shipping information
     shipping_address = models.CharField(max_length=500)
@@ -124,6 +158,7 @@ class OrderFulfillment(TimestampedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='fulfillments')
     seller = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='order_fulfillments')
+    assigned_logistics = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_shipments')
     status = models.CharField(max_length=20, choices=OrderStatus.choices, default=OrderStatus.PENDING)
     item_subtotal = models.DecimalField(max_digits=12, decimal_places=2)
     commission_amount = models.DecimalField(max_digits=12, decimal_places=2)
@@ -156,6 +191,76 @@ class OrderFulfillment(TimestampedModel):
 
     def __str__(self):
         return f'{self.order_id} shipment for {self.seller_id}'
+
+
+class ShipmentStage(models.TextChoices):
+    ORDER_CREATED = 'order_created', 'Order created'
+    PAYMENT_CONFIRMED = 'payment_confirmed', 'Payment confirmed'
+    AWAITING_COLLECTION = 'awaiting_collection', 'Awaiting seller collection'
+    COLLECTED_FROM_SELLER = 'collected_from_seller', 'Collected from seller'
+    IN_TRANSIT = 'in_transit', 'In transit'
+    ARRIVED_AT_PICKUP = 'arrived_at_pickup', 'Arrived at pickup point'
+    COLLECTED_BY_BUYER = 'collected_by_buyer', 'Collected by buyer'
+    SHIPPED = 'shipped', 'Shipped'
+    DELIVERED = 'delivered', 'Delivered'
+    CANCELLED = 'cancelled', 'Cancelled'
+
+
+class ShipmentEvent(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    fulfillment = models.ForeignKey(OrderFulfillment, on_delete=models.CASCADE, related_name='events')
+    stage = models.CharField(max_length=32, choices=ShipmentStage.choices)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
+    source = models.CharField(max_length=20, choices=[('system', 'System'), ('seller', 'Seller'), ('buyer', 'Buyer'), ('logistics', 'Logistics')])
+    note = models.CharField(max_length=255, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at', 'id']
+        constraints = [models.UniqueConstraint(fields=['fulfillment', 'stage'], name='unique_shipment_stage_per_fulfillment')]
+
+
+class HomeDeliveryStage(models.TextChoices):
+    WAITING_FOR_PARCELS = 'waiting_for_parcels', 'Waiting for parcels at pickup point'
+    RIDER_ASSIGNED = 'rider_assigned', 'Rider assigned'
+    RIDER_ACCEPTED = 'rider_accepted', 'Rider accepted'
+    COLLECTED_FROM_PICKUP = 'collected_from_pickup', 'Collected from pickup point'
+    RIDER_DELIVERED = 'rider_delivered', 'Rider reported delivery'
+    BUYER_CONFIRMED = 'buyer_confirmed', 'Buyer confirmed delivery'
+    CANCELLED = 'cancelled', 'Cancelled'
+
+
+class HomeDeliveryLeg(models.Model):
+    """A separately priced, tracked pickup-to-home journey for one order."""
+
+    order = models.OneToOneField(Order, primary_key=True, on_delete=models.CASCADE, related_name='home_delivery')
+    pickup_point = models.ForeignKey(PickupPoint, on_delete=models.PROTECT)
+    pickup_address_snapshot = models.CharField(max_length=500)
+    destination_address = models.CharField(max_length=500)
+    destination_city = models.CharField(max_length=100)
+    delivery_instructions = models.CharField(max_length=255, blank=True, default='')
+    destination_latitude = models.DecimalField(max_digits=9, decimal_places=6)
+    destination_longitude = models.DecimalField(max_digits=9, decimal_places=6)
+    distance_meters = models.DecimalField(max_digits=12, decimal_places=2)
+    fee = models.DecimalField(max_digits=12, decimal_places=2)
+    status = models.CharField(max_length=32, choices=HomeDeliveryStage.choices,
+                              default=HomeDeliveryStage.WAITING_FOR_PARCELS)
+    assigned_rider = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                       null=True, blank=True, related_name='home_deliveries')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class HomeDeliveryEvent(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    leg = models.ForeignKey(HomeDeliveryLeg, on_delete=models.CASCADE, related_name='events')
+    stage = models.CharField(max_length=32, choices=HomeDeliveryStage.choices)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
+    note = models.CharField(max_length=255, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at', 'id']
+        constraints = [models.UniqueConstraint(fields=['leg', 'stage'], name='unique_home_delivery_stage')]
 
 
 class Wishlist(TimestampedModel):

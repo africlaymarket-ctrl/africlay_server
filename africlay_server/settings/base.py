@@ -20,6 +20,9 @@ load_dotenv(BASE_DIR / '.env')
 
 # Current running environment (local, dev, prod)
 DEV_ENVIRONMENT = os.getenv('DEV_ENVIRONMENT', 'local').strip().lower()
+PICKUP_ONLY_CHECKOUT = True
+GEOAPIFY_API_KEY = os.getenv('GEOAPIFY_API_KEY', '').strip()
+DOORSTEP_CHECKOUT_ENABLED = os.getenv('DOORSTEP_CHECKOUT_ENABLED', 'false').lower() == 'true'
 
 # Security key. Never fall back to a repository value: production and local
 # commands must receive this through their environment.
@@ -139,6 +142,7 @@ REST_FRAMEWORK = {
         'password_reset_confirm': '10/hour',
         'token_refresh': '30/minute',
         'sms_dispatch': '10/hour',
+        'doorstep_address_search': '20/hour',
     },
 }
 

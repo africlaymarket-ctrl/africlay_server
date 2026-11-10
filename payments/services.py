@@ -9,6 +9,8 @@ from notifications.models import NotificationType, create_notification
 from shopping.models import (
     OrderFulfillment,
     OrderStatus,
+    ShipmentEvent,
+    ShipmentStage,
     PaymentMethod as OrderPaymentMethod,
     PaymentOption,
     PaymentStatus as OrderPaymentStatus,
@@ -572,6 +574,12 @@ class PaymentService:
                 order=payment.order,
                 status=OrderStatus.PENDING,
             ).update(status=OrderStatus.PROCESSING)
+            if first_confirmed_payment:
+                for fulfillment in OrderFulfillment.objects.filter(order=payment.order):
+                    ShipmentEvent.objects.get_or_create(
+                        fulfillment=fulfillment, stage=ShipmentStage.PAYMENT_CONFIRMED,
+                        defaults={'source': 'system'},
+                    )
             if payment.order.payment_status == OrderPaymentStatus.PAID:
                 hold_mpesa_seller_proceeds(payment.order)
             create_notification(
@@ -600,6 +608,11 @@ class PaymentService:
                             'The item price is due on delivery. You can prepare the order for fulfillment.'
                             if delivery_only else
                             f'Payment for order {payment.order_id} was confirmed. You can prepare it for fulfillment.'
+                        ) + (
+                            f' Logistics will collect from your dispatch location for '
+                            f'{payment.order.pickup_point.name}, {payment.order.pickup_point.address}, '
+                            f'{payment.order.shipping_city}.'
+                            if payment.order.pickup_point_id else ''
                         ),
                         notification_type=NotificationType.ORDER,
                         email_preference='email_seller_sales',

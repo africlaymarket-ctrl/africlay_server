@@ -84,6 +84,14 @@ class IsFinance(BasePermission):
         )
 
 
+class IsLogistics(BasePermission):
+    def has_permission(self, request, view):
+        return bool(
+            request.user and request.user.is_authenticated and request.user.is_active
+            and request.user.has_staff_role(StaffRole.LOGISTICS)
+        )
+
+
 class IsSuperAdmin(BasePermission):
     def has_permission(self, request, view):
         return bool(

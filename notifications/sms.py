@@ -20,7 +20,7 @@ PREFERENCES = {
 
 ALERT_TEXT = {
     'sms_order_updates': 'There is an update to your order.',
-    'sms_seller_sales': 'There is an update to a sale.',
+    'sms_seller_sales': 'Open Seller Orders for sale and handover details.',
     'sms_booking_updates': 'There is an update to your booking.',
     'sms_seller_bookings': 'There is an update to a service booking.',
     'sms_wallet_updates': 'There is an update to your wallet.',
