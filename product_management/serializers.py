@@ -167,10 +167,14 @@ class ProductSerializer(serializers.ModelSerializer):
         if status == 'published':
             if category is None:
                 raise serializers.ValidationError({'category': 'Choose a category before publishing.'})
-            missing = [field for field, value in measurements.items() if value is None]
-            if missing:
+            if measurements['weight_kg'] is None:
                 raise serializers.ValidationError({
-                    'shipping': 'Weight and all package dimensions are required before publishing.',
+                    'weight_kg': 'Enter an estimated packaged weight before publishing.',
+                })
+            dimensions = [measurements[field] for field in ('length_cm', 'width_cm', 'height_cm')]
+            if any(value is not None for value in dimensions) and any(value is None for value in dimensions):
+                raise serializers.ValidationError({
+                    'shipping': 'Enter all three package dimensions or leave all three blank. Without dimensions, delivery uses the listed weight.',
                 })
 
         for field, value in measurements.items():

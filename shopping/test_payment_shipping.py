@@ -69,6 +69,17 @@ class ShippingTariffTests(TestCase):
         self.assertEqual(quote.commission_amount, Decimal('100.00'))
         self.assertEqual(quote.seller_proceeds, Decimal('900.00'))
 
+    def test_product_without_dimensions_uses_listed_weight_for_delivery_quote(self):
+        self.product.length_cm = None
+        self.product.width_cm = None
+        self.product.height_cm = None
+        self.product.save(update_fields=['length_cm', 'width_cm', 'height_cm'])
+        quote = quote_cart_items([self.item], 'Nairobi')[0]
+        self.assertEqual(quote.actual_weight_kg, Decimal('6.000'))
+        self.assertEqual(quote.volumetric_weight_kg, Decimal('0.000'))
+        self.assertEqual(quote.chargeable_weight_kg, Decimal('6.000'))
+        self.assertEqual(quote.shipping_cost, Decimal('250.00'))
+
     def test_remote_destination_uses_remote_tariff(self):
         quote = quote_cart_items([self.item], 'Lodwar')[0]
 
