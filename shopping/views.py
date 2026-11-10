@@ -52,7 +52,7 @@ from .serializers import (
 )
 from .shipping import SUPPORTED_TOWNS, ShippingQuoteError, quote_cart_items
 from .geoapify import DoorstepQuoteError, quote_doorstep_leg, sign_doorstep_quote, read_doorstep_quote
-from .locations import LocationError, find_home_locations
+from .locations import LocationError, find_current_home_location, find_home_locations
 from .doorstep_access import doorstep_available_for
 
 
@@ -86,16 +86,26 @@ class DoorstepLocationSearchView(generics.GenericAPIView):
     def post(self, request, *args, **kwargs):
         if not doorstep_available_for(request.user):
             raise ValidationError({'delivery_method': 'Doorstep delivery is not available yet.'})
-        search = str(request.data.get('query') or '').strip()
         point_id = request.data.get('pickup_point_id')
-        if len(search) < 5 or len(search) > 200:
-            raise ValidationError({'query': 'Enter 5 to 200 characters of a street address or landmark.'})
         try:
             point = PickupPoint.objects.filter(pk=point_id, active=True).first()
         except (ValueError, TypeError):
             point = None
         if point is None or point.latitude is None or point.longitude is None:
             raise ValidationError({'pickup_point_id': 'Choose a pickup point with a confirmed map pin.'})
+        if 'latitude' in request.data or 'longitude' in request.data:
+            try:
+                location = find_current_home_location(
+                    latitude=request.data.get('latitude'), longitude=request.data.get('longitude'),
+                    accuracy_meters=request.data.get('accuracy_meters'),
+                    pickup_point=point, user_id=request.user.pk,
+                )
+            except LocationError as error:
+                raise ValidationError({'location': str(error)}) from error
+            return Response({'locations': [location]})
+        search = str(request.data.get('query') or '').strip()
+        if len(search) < 5 or len(search) > 200:
+            raise ValidationError({'query': 'Enter 5 to 200 characters of a street address or landmark.'})
         try:
             locations = find_home_locations(text=search, pickup_point=point, user_id=request.user.pk)
         except LocationError as error:

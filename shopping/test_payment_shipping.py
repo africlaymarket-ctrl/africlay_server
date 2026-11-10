@@ -18,7 +18,7 @@ from utility_services.utils import SMSResult
 
 from .models import Cart, CartItem, Order, PaymentStatus, PickupPoint, SettlementStatus, ShipmentEvent, ShipmentStage, HomeDeliveryLeg, HomeDeliveryStage
 from .geoapify import DoorstepLegQuote
-from .locations import LOCATION_SALT
+from .locations import LOCATION_SALT, read_home_location
 from .shipping import quote_cart_items
 from .test_support import QuotedCheckoutClient
 
@@ -200,6 +200,51 @@ class PayOnDeliveryFlowTests(TestCase):
         self.assertEqual(response.data['locations'][0]['label'], 'Test Building, Nairobi, Kenya')
         self.assertNotIn('test-only-key', str(response.data))
         self.assertEqual(get.call_args.kwargs['params']['filter'], 'countrycode:ke')
+
+    @override_settings(DOORSTEP_CHECKOUT_ENABLED=True, GEOAPIFY_API_KEY='test-only-key')
+    @patch('shopping.locations.requests.get')
+    def test_gps_location_requires_precision_city_and_buyer_confirmation(self, get):
+        point = PickupPoint.objects.get(name='AfriClay Nairobi')
+        url = reverse('shopping:doorstep-locations')
+        payload = {
+            'pickup_point_id': str(point.pk), 'latitude': '-1.290000',
+            'longitude': '36.820000', 'accuracy_meters': 20,
+        }
+        get.return_value.json.return_value = {'results': [{
+            'result_type': 'street', 'country_code': 'ke', 'city': 'Nairobi',
+            'distance': 12, 'formatted': 'Example Road, Nairobi, Kenya',
+        }]}
+        self.client.force_authenticate(self.buyer)
+        response = self.client.post(url, payload, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertNotIn('test-only-key', str(response.data))
+        location = read_home_location(
+            response.data['locations'][0]['token'], pickup_point=point, user_id=self.buyer.pk,
+        )
+        self.assertEqual(location['latitude'], '-1.290000')
+        self.assertEqual(location['longitude'], '36.820000')
+        self.assertEqual(location['address'], 'Example Road, Nairobi, Kenya')
+        self.assertEqual(get.call_args.kwargs['params']['lat'], '-1.290000')
+        with patch('shopping.views.quote_doorstep_leg') as route:
+            route.return_value = DoorstepLegQuote(Decimal('8400'), Decimal('394.00'))
+            quote = self.client.post(reverse('shopping:shipping-quote'), {
+                'delivery_method': 'doorstep', 'pickup_point_id': str(point.pk),
+                'home_location_token': response.data['locations'][0]['token'],
+            }, format='json')
+            self.assertEqual(quote.status_code, 200, quote.data)
+            self.assertEqual(route.call_args.kwargs['home_latitude'], '-1.290000')
+            self.assertEqual(route.call_args.kwargs['home_longitude'], '36.820000')
+            self.assertEqual(quote.data['doorstep_delivery_cost'], Decimal('394.00'))
+        inaccurate = self.client.post(url, {**payload, 'accuracy_meters': 900}, format='json')
+        self.assertEqual(inaccurate.status_code, 400)
+        self.assertEqual(get.call_count, 1)
+        get.return_value.json.return_value['results'][0]['city'] = 'Eldoret'
+        outside = self.client.post(url, payload, format='json')
+        self.assertEqual(outside.status_code, 400)
+        get.return_value.json.return_value['results'][0]['city'] = 'Nairobi'
+        get.return_value.json.return_value['results'][0]['distance'] = 2000
+        distant = self.client.post(url, payload, format='json')
+        self.assertEqual(distant.status_code, 400)
 
     @override_settings(DOORSTEP_CHECKOUT_ENABLED=True)
     @patch('shopping.views.quote_doorstep_leg')
