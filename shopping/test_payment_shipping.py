@@ -151,6 +151,10 @@ class PayOnDeliveryFlowTests(TestCase):
         with override_settings(DOORSTEP_TEST_EMAILS=frozenset()):
             self.client.force_authenticate(self.buyer)
             self.assertFalse(next(item for item in self.client.get(url).data if str(item['id']) == str(point.pk))['doorstep_available'])
+        with override_settings(DOORSTEP_TEST_EMAILS=frozenset({'*'})):
+            self.assertFalse(next(item for item in APIClient().get(url).data if str(item['id']) == str(point.pk))['doorstep_available'])
+            self.client.force_authenticate(self.buyer)
+            self.assertTrue(next(item for item in self.client.get(url).data if str(item['id']) == str(point.pk))['doorstep_available'])
         with override_settings(DOORSTEP_TEST_EMAILS=frozenset({self.buyer.email})):
             anonymous = APIClient().get(url)
             self.assertFalse(next(item for item in anonymous.data if str(item['id']) == str(point.pk))['doorstep_available'])

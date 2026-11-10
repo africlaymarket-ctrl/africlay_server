@@ -4,11 +4,12 @@ from django.conf import settings
 
 
 def doorstep_available_for(user):
+    """Use an explicit email allowlist, or '*' for all signed-in accounts."""
     if not settings.DOORSTEP_CHECKOUT_ENABLED or not settings.GEOAPIFY_API_KEY:
         return False
     allowed_emails = settings.DOORSTEP_TEST_EMAILS
     if not allowed_emails:
         return False
     if '*' in allowed_emails:
-        return True
+        return bool(user and user.is_authenticated)
     return bool(user and user.is_authenticated and user.email.casefold() in allowed_emails)
