@@ -89,6 +89,8 @@ class ShippingTariffTests(TestCase):
 
 @override_settings(
     PICKUP_ONLY_CHECKOUT=False,
+    GEOAPIFY_API_KEY='test-only-key',
+    DOORSTEP_TEST_EMAILS=frozenset({'pod-buyer@example.com'}),
     MPESA_ENVIRONMENT='sandbox',
     MPESA_CONSUMER_KEY='consumer-key',
     MPESA_CONSUMER_SECRET='consumer-secret',
@@ -141,6 +143,36 @@ class PayOnDeliveryFlowTests(TestCase):
             'address': 'Test Building, Nairobi, Kenya', 'city': 'Nairobi',
             'latitude': '-1.290000', 'longitude': '36.820000',
         }, salt=LOCATION_SALT)
+
+    @override_settings(DOORSTEP_CHECKOUT_ENABLED=True, GEOAPIFY_API_KEY='test-only-key')
+    def test_doorstep_test_rollout_is_limited_to_allowed_account(self):
+        point = PickupPoint.objects.get(name='AfriClay Nairobi')
+        url = reverse('shopping:pickup-point-list')
+        with override_settings(DOORSTEP_TEST_EMAILS=frozenset()):
+            self.client.force_authenticate(self.buyer)
+            self.assertFalse(next(item for item in self.client.get(url).data if str(item['id']) == str(point.pk))['doorstep_available'])
+        with override_settings(DOORSTEP_TEST_EMAILS=frozenset({self.buyer.email})):
+            anonymous = APIClient().get(url)
+            self.assertFalse(next(item for item in anonymous.data if str(item['id']) == str(point.pk))['doorstep_available'])
+            self.client.force_authenticate(self.buyer)
+            allowed = self.client.get(url)
+            self.assertTrue(next(item for item in allowed.data if str(item['id']) == str(point.pk))['doorstep_available'])
+            other = get_user_model().objects.create_user(
+                email='other-doorstep-buyer@example.com', password='StrongPassword123!',
+                role=UserRole.BUYER, is_verified=True,
+            )
+            self.client.force_authenticate(other)
+            restricted = self.client.get(url)
+            self.assertFalse(next(item for item in restricted.data if str(item['id']) == str(point.pk))['doorstep_available'])
+            quote = self.client.post(reverse('shopping:shipping-quote'), {
+                'delivery_method': 'doorstep', 'pickup_point_id': str(point.pk),
+                'home_location_token': self._home_token(point),
+            }, format='json')
+            self.assertEqual(quote.status_code, 400)
+            search = self.client.post(reverse('shopping:doorstep-locations'), {
+                'pickup_point_id': str(point.pk), 'query': 'Test Building',
+            }, format='json')
+            self.assertEqual(search.status_code, 400)
 
     @override_settings(DOORSTEP_CHECKOUT_ENABLED=True, GEOAPIFY_API_KEY='test-only-key')
     @patch('shopping.locations.requests.get')

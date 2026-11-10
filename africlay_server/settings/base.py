@@ -23,6 +23,9 @@ DEV_ENVIRONMENT = os.getenv('DEV_ENVIRONMENT', 'local').strip().lower()
 PICKUP_ONLY_CHECKOUT = True
 GEOAPIFY_API_KEY = os.getenv('GEOAPIFY_API_KEY', '').strip()
 DOORSTEP_CHECKOUT_ENABLED = os.getenv('DOORSTEP_CHECKOUT_ENABLED', 'false').lower() == 'true'
+DOORSTEP_TEST_EMAILS = frozenset(
+    email.strip().casefold() for email in os.getenv('DOORSTEP_TEST_EMAILS', '').split(',') if email.strip()
+)
 
 # Security key. Never fall back to a repository value: production and local
 # commands must receive this through their environment.

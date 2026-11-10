@@ -6,7 +6,6 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from django.shortcuts import get_object_or_404
 from django.db import transaction, IntegrityError
 from django.utils import timezone
-from django.conf import settings
 from decimal import Decimal, ROUND_HALF_UP
 
 from authapp.models import AdminAuditLog, StaffRole
@@ -54,6 +53,7 @@ from .serializers import (
 from .shipping import SUPPORTED_TOWNS, ShippingQuoteError, quote_cart_items
 from .geoapify import DoorstepQuoteError, quote_doorstep_leg, sign_doorstep_quote, read_doorstep_quote
 from .locations import LocationError, find_home_locations
+from .doorstep_access import doorstep_available_for
 
 
 COMMISSION_RATE = Decimal('0.1000')
@@ -84,7 +84,7 @@ class DoorstepLocationSearchView(generics.GenericAPIView):
     throttle_scope = 'doorstep_address_search'
 
     def post(self, request, *args, **kwargs):
-        if not settings.DOORSTEP_CHECKOUT_ENABLED:
+        if not doorstep_available_for(request.user):
             raise ValidationError({'delivery_method': 'Doorstep delivery is not available yet.'})
         search = str(request.data.get('query') or '').strip()
         point_id = request.data.get('pickup_point_id')

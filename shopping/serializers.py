@@ -4,6 +4,7 @@ from django.conf import settings
 from rest_framework import serializers
 
 from .locations import LocationError, read_home_location
+from .doorstep_access import doorstep_available_for
 
 from .models import (
     Cart, CartItem, DeliveryMethod, Order, OrderFulfillment, OrderItem, OrderStatus, PaymentMethod, PickupPoint,
@@ -25,7 +26,8 @@ class PickupPointSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_doorstep_available(self, point):
-        return bool(settings.DOORSTEP_CHECKOUT_ENABLED and settings.GEOAPIFY_API_KEY
+        request = self.context.get('request')
+        return bool(doorstep_available_for(request.user if request else None)
                     and point.active and point.latitude is not None and point.longitude is not None)
 
 
@@ -361,7 +363,7 @@ class CreateCheckoutSerializer(serializers.Serializer):
             attrs['shipping_postal_code'] = point.postal_code or 'N/A'
             attrs['shipping_country'] = 'Kenya'
             if attrs['delivery_method'] == DeliveryMethod.DOORSTEP:
-                if not settings.DOORSTEP_CHECKOUT_ENABLED:
+                if not doorstep_available_for(self.context['request'].user):
                     raise serializers.ValidationError({'delivery_method': 'Doorstep delivery is not available yet.'})
                 if point.latitude is None or point.longitude is None:
                     raise serializers.ValidationError({'pickup_point_id': 'This pickup point has no confirmed map pin.'})
