@@ -115,6 +115,8 @@ class ServiceDetailView(generics.RetrieveUpdateDestroyAPIView):
     def perform_destroy(self, instance):
         for image in instance.images.all():
             image.image.delete(save=False)
+            if image.thumbnail:
+                image.thumbnail.delete(save=False)
         instance.delete()
 
 
@@ -126,8 +128,57 @@ class ServiceImageListCreateView(generics.ListCreateAPIView):
         return ServiceImage.objects.filter(service_id=self.kwargs['pk'], service__store__owner=self.request.user)
 
     def perform_create(self, serializer):
-        service = get_object_or_404(Service, pk=self.kwargs['pk'], store__owner=self.request.user)
-        serializer.save(service=service)
+        with transaction.atomic():
+            service = get_object_or_404(
+                Service.objects.select_for_update(), pk=self.kwargs['pk'], store__owner=self.request.user,
+            )
+            if service.images.count() >= 8:
+                raise ValidationError({'image': 'A service can have at most eight images. Remove one before adding another.'})
+            if serializer.validated_data.get('is_primary'):
+                service.images.filter(is_primary=True).update(is_primary=False)
+            elif not service.images.exists():
+                serializer.validated_data['is_primary'] = True
+            serializer.save(service=service)
+
+
+class ServiceImageDetailView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class = ServiceImageSerializer
+    permission_classes = [IsSeller, IsVerifiedUser]
+    lookup_url_kwarg = 'image_id'
+
+    def get_queryset(self):
+        return ServiceImage.objects.filter(service_id=self.kwargs['pk'], service__store__owner=self.request.user)
+
+    def update(self, request, *args, **kwargs):
+        if 'image' in request.data or 'thumbnail' in request.data:
+            raise ValidationError({'image': 'Use Add images to upload a replacement photo.'})
+        return super().update(request, *args, **kwargs)
+
+    def perform_update(self, serializer):
+        with transaction.atomic():
+            Service.objects.select_for_update().get(pk=serializer.instance.service_id)
+            if serializer.validated_data.get('is_primary'):
+                ServiceImage.objects.filter(service_id=serializer.instance.service_id, is_primary=True).exclude(
+                    pk=serializer.instance.pk,
+                ).update(is_primary=False)
+            serializer.save()
+
+    def perform_destroy(self, instance):
+        for file in (instance.image, instance.thumbnail):
+            if file and file.name:
+                try:
+                    file.storage.delete(file.name)
+                except Exception:
+                    raise ValidationError({'image': 'This photo could not be removed from storage. Please try again.'}) from None
+        with transaction.atomic():
+            was_primary = instance.is_primary
+            service_id = instance.service_id
+            instance.delete()
+            if was_primary:
+                next_image = ServiceImage.objects.filter(service_id=service_id).order_by('display_order', 'created_at').first()
+                if next_image:
+                    next_image.is_primary = True
+                    next_image.save(update_fields=['is_primary'])
 
 
 class BookingListCreateView(generics.ListCreateAPIView):

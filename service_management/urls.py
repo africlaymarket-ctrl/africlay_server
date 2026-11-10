@@ -4,7 +4,7 @@ from .views import (
     BookingDetailView, BookingListCreateView,
     SellerBookingListView, SellerBookingStatusUpdateView,
     ServiceCategoryDetailView, ServiceCategoryListCreateView, ServiceDetailView,
-    ServiceImageListCreateView, ServiceListView, ServiceManageListCreateView,
+    ServiceImageDetailView, ServiceImageListCreateView, ServiceListView, ServiceManageListCreateView,
 )
 
 app_name = 'service_management'
@@ -16,6 +16,7 @@ urlpatterns = [
     path('manage/', ServiceManageListCreateView.as_view(), name='service-manage-list'),
     path('manage/<uuid:pk>/', ServiceDetailView.as_view(), name='service-manage-detail'),
     path('manage/<uuid:pk>/images/', ServiceImageListCreateView.as_view(), name='service-image-list'),
+    path('manage/<uuid:pk>/images/<uuid:image_id>/', ServiceImageDetailView.as_view(), name='service-image-detail'),
     # Bookings
     path('bookings/', BookingListCreateView.as_view(), name='booking-list'),
     path('bookings/<uuid:pk>/', BookingDetailView.as_view(), name='booking-detail'),

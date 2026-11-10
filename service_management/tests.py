@@ -11,7 +11,7 @@ from authapp.models import UserRole
 from core.test_utils import authenticate_client, create_store, create_verified_user
 from product_management.models import Tag
 from store_management.models import Store, StoreKYC, StoreKYCStatus
-from .models import Service
+from .models import Service, ServiceImage
 
 
 User = get_user_model()
@@ -142,6 +142,33 @@ class ServiceApiTests(TestCase):
         self.assertIn('services/', response.data['image'])
         self.assertIn('/thumb/', response.data['thumbnail'])
         self.assertTrue(response.data['image'].endswith('.webp'))
+
+    def test_seller_can_change_service_cover_and_replace_photos(self):
+        self.authenticate_as(self.seller)
+        service = self.client.post(reverse('service_management:service-manage-list'), self.service_data, format='json')
+        url = reverse('service_management:service-image-list', kwargs={'pk': service.data['id']})
+        def upload(name):
+            photo = SimpleUploadedFile(name, b'GIF87a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02L\x01\x00;', content_type='image/gif')
+            return self.client.post(url, {'image': photo}, format='multipart')
+        first, second = upload('first.gif'), upload('second.gif')
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 201)
+        detail_url = reverse('service_management:service-image-detail', kwargs={
+            'pk': service.data['id'], 'image_id': second.data['id'],
+        })
+        changed = self.client.patch(detail_url, {'is_primary': True}, format='json')
+        self.assertEqual(changed.status_code, 200, changed.data)
+        self.assertTrue(ServiceImage.objects.get(pk=second.data['id']).is_primary)
+        other_seller = create_verified_user(UserRole.SELLER, 'other-service-seller')
+        self.authenticate_as(other_seller)
+        self.assertEqual(self.client.delete(detail_url).status_code, 404)
+        self.authenticate_as(self.seller)
+        image = ServiceImage.objects.get(pk=second.data['id'])
+        self.assertEqual(self.client.delete(detail_url).status_code, 204)
+        self.assertFalse(image.image.storage.exists(image.image.name))
+        self.assertFalse(image.thumbnail.storage.exists(image.thumbnail.name))
+        self.assertTrue(ServiceImage.objects.get(pk=first.data['id']).is_primary)
+        self.assertEqual(upload('replacement.gif').status_code, 201)
 
     def test_seller_can_delete_owned_service(self):
         self.authenticate_as(self.seller)

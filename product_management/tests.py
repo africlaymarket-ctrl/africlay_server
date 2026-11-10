@@ -1,4 +1,5 @@
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -12,7 +13,7 @@ from authapp.models import UserRole
 from authapp.utils import generate_access_token
 from core.test_utils import approve_store_kyc, create_store, create_verified_user, authenticate_client
 from store_management.models import Store, StoreKYC, StoreKYCStatus
-from .models import Category, Product, Tag
+from .models import Category, Product, ProductImage, Tag
 
 
 User = get_user_model()
@@ -325,6 +326,59 @@ class ProductApiTests(TestCase):
 		self.assertIn('products/', response.data['image'])
 		self.assertIn('/thumb/', response.data['thumbnail'])
 		self.assertTrue(response.data['image'].endswith('.webp'))
+
+	def test_seller_can_change_cover_and_delete_uploaded_photos(self):
+		self.authenticate_as(self.seller)
+		product = self.client.post(reverse('product_management:product-manage-list'), self.product_data, format='json')
+		list_url = reverse('product_management:product-image-list', kwargs={'pk': product.data['id']})
+		def upload(name):
+			photo = SimpleUploadedFile(name, b'GIF87a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02L\x01\x00;', content_type='image/gif')
+			return self.client.post(list_url, {'image': photo}, format='multipart')
+		first, second = upload('first.gif'), upload('second.gif')
+		self.assertEqual(first.status_code, 201)
+		self.assertEqual(second.status_code, 201)
+		first_image = ProductImage.objects.get(pk=first.data['id'])
+		second_image = ProductImage.objects.get(pk=second.data['id'])
+		self.assertTrue(first_image.is_primary)
+		self.assertFalse(second_image.is_primary)
+		second_url = reverse('product_management:product-image-detail', kwargs={
+			'pk': product.data['id'], 'image_id': second_image.pk,
+		})
+		changed = self.client.patch(second_url, {'is_primary': True}, format='json')
+		self.assertEqual(changed.status_code, 200, changed.data)
+		first_image.refresh_from_db()
+		second_image.refresh_from_db()
+		self.assertFalse(first_image.is_primary)
+		self.assertTrue(second_image.is_primary)
+		self.authenticate_as(self.other_seller)
+		self.assertEqual(self.client.delete(second_url).status_code, 404)
+		self.assertTrue(ProductImage.objects.filter(pk=second_image.pk).exists())
+		self.authenticate_as(self.seller)
+		self.assertEqual(self.client.patch(second_url, {'image': 'raw-file'}, format='json').status_code, 400)
+		with patch.object(second_image.image.storage, 'delete', side_effect=OSError('storage unavailable')):
+			failed = self.client.delete(second_url)
+		self.assertEqual(failed.status_code, 400)
+		self.assertNotIn('storage unavailable', str(failed.data))
+		self.assertTrue(ProductImage.objects.filter(pk=second_image.pk).exists())
+		self.assertEqual(self.client.delete(second_url).status_code, 204)
+		self.assertFalse(ProductImage.objects.filter(pk=second_image.pk).exists())
+		first_image.refresh_from_db()
+		self.assertTrue(first_image.is_primary)
+		self.assertFalse(second_image.image.storage.exists(second_image.image.name))
+		self.assertFalse(second_image.thumbnail.storage.exists(second_image.thumbnail.name))
+		self.assertEqual(upload('replacement.gif').status_code, 201)
+
+	def test_product_image_count_is_enforced_by_backend(self):
+		self.authenticate_as(self.seller)
+		product = self.client.post(reverse('product_management:product-manage-list'), self.product_data, format='json')
+		url = reverse('product_management:product-image-list', kwargs={'pk': product.data['id']})
+		for index in range(8):
+			photo = SimpleUploadedFile(f'{index}.gif', b'GIF87a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02L\x01\x00;', content_type='image/gif')
+			self.assertEqual(self.client.post(url, {'image': photo}, format='multipart').status_code, 201)
+		extra = SimpleUploadedFile('extra.gif', b'GIF87a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02L\x01\x00;', content_type='image/gif')
+		response = self.client.post(url, {'image': extra}, format='multipart')
+		self.assertEqual(response.status_code, 400)
+		self.assertEqual(ProductImage.objects.filter(product_id=product.data['id']).count(), 8)
 
 	def test_public_catalogue_honours_limit_and_returns_only_cover_image(self):
 		self.approve_store_kyc()
