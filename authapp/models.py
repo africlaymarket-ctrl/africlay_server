@@ -6,7 +6,7 @@ from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
 from django.utils import timezone
 
-from core.models import TimestampedModel, avatar_upload_path, validate_image_upload
+from core.models import TimestampedModel, avatar_upload_path, validate_image_upload, rider_document_upload_path, validate_document_upload
 
 
 class UserRole(models.TextChoices):
@@ -48,6 +48,12 @@ class StaffRole(models.TextChoices):
 
 class DashboardAccessRequestStatus(models.TextChoices):
     PENDING = 'pending', 'Pending'
+    APPROVED = 'approved', 'Approved'
+    REJECTED = 'rejected', 'Rejected'
+
+
+class RiderApplicationStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending review'
     APPROVED = 'approved', 'Approved'
     REJECTED = 'rejected', 'Rejected'
 
@@ -193,6 +199,22 @@ class UserStaffRole(TimestampedModel):
 
     def __str__(self):
         return f'{self.user.email}: {self.role}'
+
+
+class RiderApplication(TimestampedModel):
+    """Private rider verification; approval is required for new delivery assignments."""
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='rider_application')
+    city = models.CharField(max_length=100)
+    vehicle_type = models.CharField(max_length=40)
+    vehicle_registration = models.CharField(max_length=40)
+    licence_number = models.CharField(max_length=80)
+    identity_document = models.FileField(upload_to=rider_document_upload_path, validators=[validate_document_upload])
+    licence_document = models.FileField(upload_to=rider_document_upload_path, validators=[validate_document_upload])
+    sms_alerts = models.BooleanField(default=False)
+    status = models.CharField(max_length=16, choices=RiderApplicationStatus.choices, default=RiderApplicationStatus.PENDING, db_index=True)
+    reviewed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name='reviewed_riders')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_reason = models.TextField(blank=True, default='')
 
 
 class DashboardAccessRequest(TimestampedModel):

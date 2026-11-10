@@ -1,4 +1,5 @@
 from django.urls import path
+from .rider_views import RiderApplicationMineView, RiderApplicationQueueView, RiderApplicationReviewView, RiderApplicationDocumentView
 from .views import (
     RegisterView,
     VerifyEmailView,
@@ -32,6 +33,10 @@ from .operations_views import (
 app_name = 'authapp'
 
 urlpatterns = [
+    path('rider-application/', RiderApplicationMineView.as_view(), name='rider-application-mine'),
+    path('admin/rider-applications/', RiderApplicationQueueView.as_view(), name='rider-application-queue'),
+    path('admin/rider-applications/<int:pk>/review/', RiderApplicationReviewView.as_view(), name='rider-application-review'),
+    path('admin/rider-applications/<int:pk>/documents/<str:kind>/', RiderApplicationDocumentView.as_view(), name='rider-application-document'),
     path('admin/overview/', AdminOperationsSummaryView.as_view(), name='admin-operations-summary'),
     path('admin/catalog/<str:kind>/', AdminCatalogListView.as_view(), name='admin-catalog-list'),
     path('admin/catalog/<str:kind>/<uuid:pk>/status/', AdminCatalogStatusView.as_view(), name='admin-catalog-status'),

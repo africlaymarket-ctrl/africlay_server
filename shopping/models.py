@@ -224,6 +224,7 @@ class HomeDeliveryStage(models.TextChoices):
     WAITING_FOR_PARCELS = 'waiting_for_parcels', 'Waiting for parcels at pickup point'
     RIDER_ASSIGNED = 'rider_assigned', 'Rider assigned'
     RIDER_ACCEPTED = 'rider_accepted', 'Rider accepted'
+    RIDER_DECLINED = 'rider_declined', 'Rider declined'
     COLLECTED_FROM_PICKUP = 'collected_from_pickup', 'Collected from pickup point'
     RIDER_DELIVERED = 'rider_delivered', 'Rider reported delivery'
     BUYER_CONFIRMED = 'buyer_confirmed', 'Buyer confirmed delivery'
@@ -247,6 +248,7 @@ class HomeDeliveryLeg(models.Model):
                               default=HomeDeliveryStage.WAITING_FOR_PARCELS)
     assigned_rider = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
                                        null=True, blank=True, related_name='home_deliveries')
+    accept_by = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
 
@@ -260,7 +262,7 @@ class HomeDeliveryEvent(models.Model):
 
     class Meta:
         ordering = ['created_at', 'id']
-        constraints = [models.UniqueConstraint(fields=['leg', 'stage'], name='unique_home_delivery_stage')]
+        constraints = []
 
 
 class Wishlist(TimestampedModel):

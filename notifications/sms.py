@@ -30,6 +30,11 @@ ALERT_TEXT = {
 def _enabled(user, preference):
     if not user.is_active:
         return False
+    if preference == 'sms_logistics_assignments':
+        from authapp.models import RiderApplicationStatus, StaffRole
+        application = getattr(user, 'rider_application', None)
+        return bool(application and application.status == RiderApplicationStatus.APPROVED
+                    and application.sms_alerts and user.has_staff_role(StaffRole.LOGISTICS))
     try:
         values = user.profile.notification_preferences
     except AttributeError:
@@ -49,6 +54,20 @@ def queue_notification_sms(notification, email_preference):
     message = f'AfriClay Market: {ALERT_TEXT[preference]} Details are in your AfriClay account.'
     return SMSDelivery.objects.create(
         notification=notification, recipient=phone, message=message, preference=preference,
+    )
+
+
+def queue_rider_assignment_sms(notification):
+    preference = 'sms_logistics_assignments'
+    if not _enabled(notification.user, preference):
+        return None
+    phone = normalize_phone_number(notification.user.phone_number)
+    if not valid_sms_phone(phone):
+        return None
+    return SMSDelivery.objects.create(
+        notification=notification, recipient=phone,
+        message='AfriClay Market: A delivery job is assigned to you. Sign in to Operations to review and accept it.',
+        preference=preference,
     )
 
 

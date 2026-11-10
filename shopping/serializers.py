@@ -105,16 +105,21 @@ class RiderHomeDeliverySerializer(HomeDeliveryLegSerializer):
     buyer_phone = serializers.CharField(source='order.buyer.phone_number', read_only=True)
 
     class Meta(HomeDeliveryLegSerializer.Meta):
-        fields = HomeDeliveryLegSerializer.Meta.fields + ['order_id', 'pickup_point', 'assigned_rider_id', 'buyer_phone', 'created_at']
+        fields = HomeDeliveryLegSerializer.Meta.fields + ['order_id', 'pickup_point', 'assigned_rider_id', 'buyer_phone', 'accept_by', 'created_at']
         read_only_fields = fields
 
 
 class RiderHomeDeliveryEventInputSerializer(serializers.Serializer):
     stage = serializers.ChoiceField(choices=[
-        HomeDeliveryStage.RIDER_ACCEPTED, HomeDeliveryStage.COLLECTED_FROM_PICKUP,
+        HomeDeliveryStage.RIDER_ACCEPTED, HomeDeliveryStage.RIDER_DECLINED, HomeDeliveryStage.COLLECTED_FROM_PICKUP,
         HomeDeliveryStage.RIDER_DELIVERED,
     ])
     note = serializers.CharField(required=False, allow_blank=True, max_length=255)
+
+    def validate(self, attrs):
+        if attrs['stage'] == HomeDeliveryStage.RIDER_DECLINED and len(attrs.get('note', '').strip()) < 5:
+            raise serializers.ValidationError({'note': 'Explain why this delivery is being declined.'})
+        return attrs
 
 
 class LogisticsEventInputSerializer(serializers.Serializer):

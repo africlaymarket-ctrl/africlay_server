@@ -1,14 +1,16 @@
 from decimal import Decimal
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core import signing
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from authapp.models import AdminAuditLog, StaffRole, UserRole, UserStaffRole
+from authapp.models import AdminAuditLog, StaffRole, UserRole, UserStaffRole, RiderApplication, RiderApplicationStatus
 from payments.models import LedgerEntry, LedgerEntryType, Payment, PaymentPurpose, Wallet
 from payments.services import PaymentService, credit_wallet
 from notifications.models import Notification, SMSDelivery
@@ -353,7 +355,7 @@ class PayOnDeliveryFlowTests(TestCase):
         self.assertEqual(direct.post(reverse('shopping:checkout'), confirmed, format='json').status_code, 400)
         self.assertFalse(Order.objects.exists())
 
-    @override_settings(DOORSTEP_CHECKOUT_ENABLED=True)
+    @override_settings(DOORSTEP_CHECKOUT_ENABLED=True, SMS_NOTIFICATIONS_ENABLED=True)
     @patch('shopping.views.quote_doorstep_leg')
     def test_doorstep_rider_and_buyer_confirmation_release_seller_only_after_delivery(self, route):
         route.return_value = DoorstepLegQuote(Decimal('8400'), Decimal('394.00'))
@@ -371,8 +373,11 @@ class PayOnDeliveryFlowTests(TestCase):
         original_pickup_address = point.address
         point.address = 'Edited pickup point address after order'
         point.save(update_fields=['address'])
-        staff = get_user_model().objects.create_user(email='home-rider@example.com', password='StrongPassword123!')
+        staff = get_user_model().objects.create_user(email='home-rider@example.com', password='StrongPassword123!', is_verified=True, phone_number='254712345678')
         UserStaffRole.objects.create(user=staff, role=StaffRole.LOGISTICS)
+        RiderApplication.objects.create(user=staff, city=point.city, vehicle_type='Motorcycle',
+            vehicle_registration='KMX 100A', licence_number='DL-100', identity_document='kyc/riders/test/id.jpg',
+            licence_document='kyc/riders/test/licence.jpg', sms_alerts=True, status=RiderApplicationStatus.APPROVED)
         other_staff = get_user_model().objects.create_user(email='other-home-rider@example.com', password='StrongPassword123!')
         UserStaffRole.objects.create(user=other_staff, role=StaffRole.LOGISTICS)
         superadmin = get_user_model().objects.create_superuser(email='home-admin@example.com', password='StrongPassword123!')
@@ -390,6 +395,15 @@ class PayOnDeliveryFlowTests(TestCase):
         ):
             assigned = self.client.post(url, {'email': staff.email, 'reason': 'Assigned for the confirmed route.'}, format='json')
             self.assertEqual(assigned.status_code, 200, assigned.data)
+        notice = Notification.objects.get(user=staff, title='New delivery assigned')
+        self.assertTrue(SMSDelivery.objects.filter(notification=notice, preference='sms_logistics_assignments').exists())
+        repeated = self.client.post(reverse('shopping:home-delivery-assign', args=[order.pk]),
+            {'email': staff.email, 'reason': 'Duplicate delivery assignment.'}, format='json')
+        self.assertTrue(repeated.data['already_assigned'])
+        self.assertEqual(Notification.objects.filter(user=staff, title='New delivery assigned').count(), 1)
+        rejected_assignment = self.client.post(reverse('shopping:home-delivery-assign', args=[order.pk]),
+            {'email': other_staff.email, 'reason': 'Try unapproved rider.'}, format='json')
+        self.assertEqual(rejected_assignment.status_code, 400)
         self.client.force_authenticate(other_staff)
         other_jobs = self.client.get(reverse('shopping:home-deliveries'))
         self.assertEqual(other_jobs.status_code, 200, other_jobs.data)
@@ -402,6 +416,22 @@ class PayOnDeliveryFlowTests(TestCase):
         self.assertEqual(len(jobs.data['results']), 1)
         self.assertEqual(jobs.data['results'][0]['pickup_address_snapshot'], original_pickup_address)
         event_url = reverse('shopping:home-delivery-event', args=[order.pk])
+        HomeDeliveryLeg.objects.filter(order=order).update(accept_by=timezone.now() - timedelta(minutes=1))
+        self.assertEqual(self.client.post(event_url, {'stage': HomeDeliveryStage.RIDER_ACCEPTED}, format='json').status_code, 400)
+        self.client.force_authenticate(superadmin)
+        renewed = self.client.post(reverse('shopping:home-delivery-assign', args=[order.pk]),
+            {'email': staff.email, 'reason': 'Renew expired acceptance window.'}, format='json')
+        self.assertEqual(renewed.status_code, 200, renewed.data)
+        self.client.force_authenticate(staff)
+        declined = self.client.post(event_url, {'stage': HomeDeliveryStage.RIDER_DECLINED, 'note': 'Vehicle unavailable'}, format='json')
+        self.assertEqual(declined.status_code, 201, declined.data)
+        self.assertEqual(self.client.get(reverse('shopping:home-deliveries')).data['results'], [])
+        self.assertTrue(Notification.objects.filter(user=superadmin, title='Delivery declined').exists())
+        self.client.force_authenticate(superadmin)
+        reassigned = self.client.post(reverse('shopping:home-delivery-assign', args=[order.pk]),
+            {'email': staff.email, 'reason': 'Rider available again.'}, format='json')
+        self.assertEqual(reassigned.status_code, 200, reassigned.data)
+        self.client.force_authenticate(staff)
         self.assertEqual(self.client.post(event_url, {'stage': HomeDeliveryStage.COLLECTED_FROM_PICKUP}, format='json').status_code, 400)
         self.assertEqual(self.client.post(event_url, {'stage': HomeDeliveryStage.RIDER_ACCEPTED}, format='json').status_code, 201)
         self.assertEqual(self.client.post(event_url, {'stage': HomeDeliveryStage.COLLECTED_FROM_PICKUP}, format='json').status_code, 400)

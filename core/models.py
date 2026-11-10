@@ -32,6 +32,10 @@ def kyc_document_upload_path(instance, filename):
     return f'kyc/{instance.store_id}/{_upload_name(filename)}'
 
 
+def rider_document_upload_path(instance, filename):
+    return f'kyc/riders/{instance.user_id}/{_upload_name(filename)}'
+
+
 def product_image_upload_path(instance, filename):
     return f'public/products/{instance.product.store_id}/{instance.product_id}/detail/{_upload_name(filename)}'
 

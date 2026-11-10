@@ -5,10 +5,12 @@ from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from django.shortcuts import get_object_or_404
 from django.db import transaction, IntegrityError
+from django.conf import settings
+from datetime import timedelta
 from django.utils import timezone
 from decimal import Decimal, ROUND_HALF_UP
 
-from authapp.models import AdminAuditLog, StaffRole
+from authapp.models import AdminAuditLog, StaffRole, RiderApplicationStatus, UserRole
 from authapp.permissions import IsAuthenticated, IsBuyer, IsLogistics, IsSeller, IsSuperAdmin, IsVerifiedUser
 from product_management.models import Product
 
@@ -952,6 +954,8 @@ class LogisticsAssignmentView(generics.GenericAPIView):
                     reason=serializer.validated_data['reason'],
                     metadata={'previous_assignee_id': str(previous_id) if previous_id else '', 'assignee_id': str(assignee.pk)},
                 )
+                create_notification(assignee, title='Seller collection assigned',
+                    message=f'Order {str(fulfillment.order_id)[:8]}: open Logistics for your collection details.')
         return Response({'fulfillment_id': fulfillment.pk, 'assigned_logistics_id': assignee.pk})
 
 
@@ -979,8 +983,8 @@ class RiderHomeDeliveryAssignmentView(generics.GenericAPIView):
         with transaction.atomic():
             leg = get_object_or_404(HomeDeliveryLeg.objects.select_for_update().select_related('order'),
                                     order_id=kwargs['pk'])
-            if leg.status != HomeDeliveryStage.WAITING_FOR_PARCELS or leg.order.status in {OrderStatus.CANCELLED, OrderStatus.DELIVERED}:
-                raise ValidationError({'status': 'Only active, unassigned home deliveries can be assigned.'})
+            if leg.status not in {HomeDeliveryStage.WAITING_FOR_PARCELS, HomeDeliveryStage.RIDER_ASSIGNED} or leg.order.status in {OrderStatus.CANCELLED, OrderStatus.DELIVERED}:
+                raise ValidationError({'status': 'Only waiting or unaccepted home deliveries can be assigned.'})
             if not leg.order.delivery_fee_paid:
                 raise ValidationError({'payment': 'Wait for confirmed delivery payment before assigning a rider.'})
             matches = list(get_user_model().objects.filter(
@@ -989,16 +993,34 @@ class RiderHomeDeliveryAssignmentView(generics.GenericAPIView):
             if len(matches) != 1 or not matches[0].staff_role_assignments.filter(role=StaffRole.LOGISTICS).exists():
                 raise ValidationError({'email': 'Choose one active logistics staff account.'})
             rider = matches[0]
+            if not rider.is_verified or not getattr(getattr(rider, 'rider_application', None), 'status', None) == RiderApplicationStatus.APPROVED:
+                raise ValidationError({'email': 'This rider must have an approved rider application.'})
+            if rider.rider_application.city.strip().casefold() != leg.pickup_point.city.strip().casefold():
+                raise ValidationError({'email': 'The rider must be approved for this pickup point city.'})
+            if leg.assigned_rider_id == rider.pk and leg.status == HomeDeliveryStage.RIDER_ASSIGNED and leg.accept_by and leg.accept_by > timezone.now():
+                return Response({'order_id': leg.order_id, 'assigned_rider_id': rider.pk, 'already_assigned': True})
+            previous_id = leg.assigned_rider_id
             leg.assigned_rider = rider
             leg.status = HomeDeliveryStage.RIDER_ASSIGNED
-            leg.save(update_fields=['assigned_rider', 'status'])
+            leg.accept_by = timezone.now() + timedelta(minutes=30)
+            leg.save(update_fields=['assigned_rider', 'status', 'accept_by'])
             HomeDeliveryEvent.objects.create(leg=leg, stage=HomeDeliveryStage.RIDER_ASSIGNED, actor=request.user)
             AdminAuditLog.objects.create(
                 actor=request.user, action='home_delivery_rider_assigned',
                 target_type='home_delivery_leg', target_id=str(leg.order_id),
                 reason=serializer.validated_data['reason'],
-                metadata={'assignee_id': str(rider.pk)},
+                metadata={'assignee_id': str(rider.pk), 'previous_assignee_id': str(previous_id) if previous_id else ''},
             )
+            if previous_id and previous_id != rider.pk:
+                create_notification(get_user_model().objects.get(pk=previous_id), title='Delivery assignment changed',
+                                    message='A delivery previously assigned to you has been reassigned.')
+            rider_notice = create_notification(rider, title='New delivery assigned',
+                message=f'Order {str(leg.order_id)[:8]}: a paid doorstep delivery is ready for your review. Open Logistics and accept it before the deadline.')
+            from notifications.sms import queue_rider_assignment_sms, dispatch_notification_sms
+            if settings.SMS_NOTIFICATIONS_ENABLED:
+                sms = queue_rider_assignment_sms(rider_notice)
+                if sms:
+                    transaction.on_commit(lambda delivery_id=sms.pk: dispatch_notification_sms(delivery_id))
         return Response({'order_id': leg.order_id, 'assigned_rider_id': rider.pk})
 
 
@@ -1012,6 +1034,7 @@ class RiderHomeDeliveryEventView(generics.GenericAPIView):
         stage = serializer.validated_data['stage']
         preceding = {
             HomeDeliveryStage.RIDER_ACCEPTED: HomeDeliveryStage.RIDER_ASSIGNED,
+            HomeDeliveryStage.RIDER_DECLINED: HomeDeliveryStage.RIDER_ASSIGNED,
             HomeDeliveryStage.COLLECTED_FROM_PICKUP: HomeDeliveryStage.RIDER_ACCEPTED,
             HomeDeliveryStage.RIDER_DELIVERED: HomeDeliveryStage.COLLECTED_FROM_PICKUP,
         }[stage]
@@ -1024,8 +1047,12 @@ class RiderHomeDeliveryEventView(generics.GenericAPIView):
                 raise ValidationError({'payment': 'Wait for confirmed delivery payment before updating this delivery.'})
             if leg.status == stage:
                 return Response({'stage': stage, 'already_recorded': True})
+            if stage == HomeDeliveryStage.RIDER_DECLINED and leg.status == HomeDeliveryStage.RIDER_ACCEPTED:
+                preceding = HomeDeliveryStage.RIDER_ACCEPTED
             if leg.status != preceding or leg.order.status in {OrderStatus.CANCELLED, OrderStatus.DELIVERED}:
                 raise ValidationError({'stage': 'Complete the preceding delivery milestone first.'})
+            if stage == HomeDeliveryStage.RIDER_ACCEPTED and leg.accept_by and timezone.now() > leg.accept_by:
+                raise ValidationError({'stage': 'The acceptance window has expired. Contact logistics for reassignment.'})
             if stage == HomeDeliveryStage.COLLECTED_FROM_PICKUP:
                 active = OrderFulfillment.objects.filter(order=leg.order).exclude(status=OrderStatus.CANCELLED)
                 if not active.exists() or any(
@@ -1033,8 +1060,20 @@ class RiderHomeDeliveryEventView(generics.GenericAPIView):
                     for fulfillment in active
                 ):
                     raise ValidationError({'stage': 'All parcels must arrive at the pickup point first.'})
-            leg.status = stage
-            leg.save(update_fields=['status'])
+            if stage == HomeDeliveryStage.RIDER_DECLINED:
+                leg.status = HomeDeliveryStage.WAITING_FOR_PARCELS
+                leg.assigned_rider = None
+                leg.accept_by = None
+                leg.save(update_fields=['status', 'assigned_rider', 'accept_by'])
+                AdminAuditLog.objects.create(actor=request.user, action='home_delivery_rider_declined',
+                    target_type='home_delivery_leg', target_id=str(leg.order_id),
+                    reason=serializer.validated_data.get('note', ''), metadata={})
+                for administrator in get_user_model().objects.filter(is_active=True, role=UserRole.SUPER_ADMIN):
+                    create_notification(administrator, title='Delivery declined',
+                        message=f'Order {str(leg.order_id)[:8]} needs another rider. Open Logistics to reassign it.')
+            else:
+                leg.status = stage
+                leg.save(update_fields=['status'])
             event = HomeDeliveryEvent.objects.create(
                 leg=leg, stage=stage, actor=request.user,
                 note=serializer.validated_data.get('note', ''),
