@@ -103,6 +103,28 @@ class ProductApiTests(TestCase):
 		self.assertEqual(response.data['count'], 1)
 		self.assertEqual(response.data['results'][0]['slug'], create_response.data['slug'])
 
+	def test_legacy_archived_product_can_be_republished_after_measurements_are_added(self):
+		self.approve_store_kyc()
+		self.authenticate_as(self.seller)
+		created = self.client.post(
+			reverse('product_management:product-manage-list'),
+			{**self.product_data, 'status': 'archived', 'length_cm': None,
+			 'width_cm': None, 'height_cm': None}, format='json',
+		)
+		self.assertEqual(created.status_code, status.HTTP_201_CREATED, created.data)
+		url = reverse('product_management:product-manage-detail', args=[created.data['id']])
+		missing = self.client.patch(url, {'status': 'published'}, format='json')
+		self.assertEqual(missing.status_code, status.HTTP_400_BAD_REQUEST, missing.data)
+		self.assertIn('shipping', missing.data)
+		self.assertEqual(Product.objects.get(pk=created.data['id']).status, 'archived')
+		restored = self.client.patch(url, {
+			'status': 'published', 'length_cm': '15.00',
+			'width_cm': '12.00', 'height_cm': '10.00',
+		}, format='json')
+		self.assertEqual(restored.status_code, status.HTTP_200_OK, restored.data)
+		self.assertEqual(restored.data['status'], 'published')
+		self.assertEqual(restored.data['length_cm'], '15.00')
+
 	def test_public_catalogue_filters_by_category_and_tag_slug(self):
 		self.approve_store_kyc()
 		category = Category.objects.create(name='Ceramics', slug='ceramics')
