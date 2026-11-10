@@ -13,6 +13,7 @@ security_migration = import_module(
 policy_acceptance_migration = import_module(
     'authapp.migrations.0009_secure_policy_acceptance'
 )
+rider_application_migration = import_module('authapp.migrations.0012_secure_rider_application')
 
 
 class PublicSchemaSecurityMigrationTests(SimpleTestCase):
@@ -63,6 +64,18 @@ class PublicSchemaSecurityMigrationTests(SimpleTestCase):
         policy_acceptance_migration.secure_policy_acceptance(None, schema_editor)
 
         schema_editor.connection.cursor.assert_not_called()
+
+    def test_rider_application_is_private_after_creation(self):
+        schema_editor = MagicMock()
+        schema_editor.connection.vendor = 'postgresql'
+        cursor = schema_editor.connection.cursor.return_value.__enter__.return_value
+        rider_application_migration.secure_rider_application(None, schema_editor)
+        cursor.execute.assert_called_once_with(rider_application_migration.SECURE_RIDER_APPLICATION_SQL)
+        sql = rider_application_migration.SECURE_RIDER_APPLICATION_SQL
+        self.assertIn('authapp_riderapplication ENABLE ROW LEVEL SECURITY', sql)
+        self.assertIn('REVOKE ALL PRIVILEGES ON TABLE public.authapp_riderapplication', sql)
+        self.assertIn('REVOKE ALL PRIVILEGES ON SEQUENCE public.authapp_riderapplication_id_seq', sql)
+        self.assertNotIn('FORCE ROW LEVEL SECURITY', sql)
 
 
 class PublicDatabaseAccessAuditTests(SimpleTestCase):
