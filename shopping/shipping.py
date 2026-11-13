@@ -2,6 +2,7 @@ import math
 import re
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
+from product_management.pricing import item_price, item_weight, item_stock
 
 
 MONEY = Decimal('0.01')
@@ -246,8 +247,11 @@ def quote_cart_items(cart_items, destination_city):
         for item in seller_items:
             product = item.product
             quantity = item.quantity
-            item_subtotal += product.price * quantity
-            unit_actual = Decimal(product.weight_kg or Decimal('1.000'))
+            available = item_stock(item)
+            if available < quantity:
+                raise ShippingQuoteError(f'{product.name} has only {available} available for this choice. Update your cart.')
+            item_subtotal += item_price(item) * quantity
+            unit_actual = Decimal(item_weight(item) or Decimal('1.000'))
             unit_volumetric = product_volumetric_weight(product)
             actual_weight += unit_actual * quantity
             volumetric_weight += unit_volumetric * quantity

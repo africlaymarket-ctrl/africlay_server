@@ -81,6 +81,32 @@ class ProductApiTests(TestCase):
 		catalogue = self.client.get(reverse('product_management:product-list'))
 		self.assertEqual(catalogue.data['results'][0]['price_unit'], 'bunch')
 
+	def test_seller_can_publish_named_price_choices(self):
+		self.approve_store_kyc()
+		self.authenticate_as(self.seller)
+		response = self.client.post(
+			reverse('product_management:product-manage-list'),
+			{**self.product_data, 'status': 'published', 'price_unit': 'piece', 'length_cm': None, 'width_cm': None, 'height_cm': None, 'price_options': [
+				{'label': 'Small', 'price': '80.00', 'stock_quantity': 3, 'weight_kg': '1.000'},
+				{'label': 'Large', 'price': '150.00', 'stock_quantity': 2, 'weight_kg': '2.000'},
+			]}, format='json',
+		)
+		self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+		self.assertEqual(response.data['price'], '80.00')
+		self.assertEqual(response.data['stock_quantity'], 5)
+		self.assertEqual(len(response.data['price_options']), 2)
+		self.client.credentials()
+		catalogue = self.client.get(reverse('product_management:product-list'))
+		self.assertEqual(len(catalogue.data['results'][0]['price_options']), 2)
+		self.authenticate_as(self.seller)
+		changed_base = self.client.patch(
+			reverse('product_management:product-manage-detail', args=[response.data['id']]),
+			{'price': '1.00', 'stock_quantity': 999}, format='json',
+		)
+		self.assertEqual(changed_base.status_code, status.HTTP_200_OK, changed_base.data)
+		self.assertEqual(changed_base.data['price'], '80.00')
+		self.assertEqual(changed_base.data['stock_quantity'], 5)
+
 	def test_seller_cannot_create_product_for_another_store(self):
 		self.authenticate_as(self.seller)
 

@@ -162,6 +162,8 @@ class ProductDetailView(generics.RetrieveUpdateAPIView):
 
     def get_queryset(self):
         products = Product.objects.select_related('store', 'category').prefetch_related('tags', 'images')
+        if self.request.method not in permissions.SAFE_METHODS:
+            products = products.select_for_update(of=('self',))
         if self.kwargs.get('slug'):
             return products.filter(status=ProductStatus.PUBLISHED, store__status=StoreStatus.ACTIVE, store__kyc__status=StoreKYCStatus.APPROVED)
         if self.request.user.is_admin_role:
@@ -181,12 +183,13 @@ class ProductDetailView(generics.RetrieveUpdateAPIView):
     def update(self, request, *args, **kwargs):
         if 'slug' in self.kwargs:
             raise MethodNotAllowed(request.method)
-        return super().update(request, *args, **kwargs)
+        with transaction.atomic():
+            return super().update(request, *args, **kwargs)
 
     def partial_update(self, request, *args, **kwargs):
         if 'slug' in self.kwargs:
             raise MethodNotAllowed(request.method)
-        return super().partial_update(request, *args, **kwargs)
+        return self.update(request, *args, partial=True, **kwargs)
 
     def perform_update(self, serializer):
         if serializer.instance.store.owner_id != self.request.user.id and not self.request.user.is_admin_role:

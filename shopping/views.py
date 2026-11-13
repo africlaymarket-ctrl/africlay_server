@@ -13,6 +13,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from authapp.models import AdminAuditLog, StaffRole, RiderApplicationStatus, UserRole
 from authapp.permissions import IsAuthenticated, IsBuyer, IsLogistics, IsSeller, IsSuperAdmin, IsVerifiedUser
 from product_management.models import Product
+from product_management.pricing import selected_option, item_price, item_stock
 
 from payments.models import LedgerEntryType, Wallet, WalletBalanceSource, WalletTransactionType
 from payments.services import (
@@ -133,15 +134,22 @@ def _checkout_items(cart, validated_data):
     if product is None:
         raise ValidationError({'buy_now_product_id': 'This product is no longer available.'})
     quantity = validated_data.get('buy_now_quantity', 1)
+    option_id = validated_data.get('buy_now_option_id')
+    try:
+        option = selected_option(product, option_id)
+    except ValueError as error:
+        raise ValidationError({'buy_now_option_id': str(error)}) from error
     if product.status != 'published' or product.store.status != 'active':
         raise ValidationError({'buy_now_product_id': 'This product is not available for purchase.'})
-    if product.stock_quantity < quantity:
+    available = option['stock_quantity'] if option else product.stock_quantity
+    if available < quantity:
         raise ValidationError({
-            'buy_now_quantity': f'Only {product.stock_quantity} items are available.',
+            'buy_now_quantity': f'Only {available} items are available.',
         })
     return [CartItem(
         cart=cart,
         product=product,
+        option_id=option_id,
         quantity=quantity,
     )]
 
@@ -210,17 +218,23 @@ class CartItemListCreateView(generics.ListCreateAPIView):
         except Product.DoesNotExist:
             raise ValidationError({'product': 'Product not found.'})
 
-        if product.stock_quantity == 0:
+        option_id = request.data.get('option_id') or None
+        try:
+            option = selected_option(product, option_id)
+        except ValueError as error:
+            raise ValidationError({'option_id': str(error)}) from error
+        available = option['stock_quantity'] if option else product.stock_quantity
+        if available == 0:
             raise ValidationError({'product': 'Product is out of stock.'})
 
-        if quantity > product.stock_quantity:
-            raise ValidationError({'quantity': f'Only {product.stock_quantity} items available.'})
+        if quantity > available:
+            raise ValidationError({'quantity': f'Only {available} items available.'})
 
-        existing_item = CartItem.objects.filter(cart=cart, product=product).first()
+        existing_item = CartItem.objects.filter(cart=cart, product=product, option_id=option_id).first()
         if existing_item:
             new_quantity = existing_item.quantity + quantity
-            if new_quantity > product.stock_quantity:
-                raise ValidationError({'quantity': f'Total quantity {new_quantity} exceeds available stock {product.stock_quantity}.'})
+            if new_quantity > available:
+                raise ValidationError({'quantity': f'Total quantity {new_quantity} exceeds available stock {available}.'})
             existing_item.quantity = new_quantity
             existing_item.save()
             serializer = self.get_serializer(existing_item)
@@ -228,7 +242,7 @@ class CartItemListCreateView(generics.ListCreateAPIView):
         else:
             serializer = self.get_serializer(data=request.data)
             serializer.is_valid(raise_exception=True)
-            serializer.save(cart=cart, product=product)
+            serializer.save(cart=cart, product=product, option_id=option_id)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
@@ -245,8 +259,12 @@ class CartItemDetailView(generics.RetrieveUpdateDestroyAPIView):
         product = serializer.instance.product
         quantity = serializer.validated_data.get('quantity', serializer.instance.quantity)
 
-        if quantity > product.stock_quantity:
-            raise ValidationError({'quantity': f'Only {product.stock_quantity} items available.'})
+        try:
+            available = item_stock(serializer.instance)
+        except ValueError as error:
+            raise ValidationError({'option_id': str(error)}) from error
+        if quantity > available:
+            raise ValidationError({'quantity': f'Only {available} items available.'})
 
         serializer.save()
 
@@ -264,7 +282,7 @@ class ShippingQuoteView(generics.GenericAPIView):
             raise ValidationError({'cart': 'Cannot checkout with an empty cart.'})
         try:
             quotes = quote_cart_items(cart_items, serializer.validated_data['shipping_city'])
-        except ShippingQuoteError as error:
+        except ValueError as error:
             raise ValidationError({'shipping_city': str(error)}) from error
         quote_payload = _shipping_quote_payload(quotes)
         point = serializer.validated_data.get('pickup_point')
@@ -351,8 +369,13 @@ class CheckoutView(generics.GenericAPIView):
                         raise ValidationError({'product': f'{product.name} is not available for purchase.'})
                     if product.store.status != 'active':
                         raise ValidationError({'product': f'Store for {product.name} is not active.'})
-                    if product.stock_quantity < item.quantity:
-                        raise ValidationError({'product': f'Insufficient stock for {product.name}. Only {product.stock_quantity} available.'})
+                    item.product = product
+                    try:
+                        available = item_stock(item)
+                    except ValueError as error:
+                        raise ValidationError({'option_id': str(error)}) from error
+                    if available < item.quantity:
+                        raise ValidationError({'product': f'Insufficient stock for {product.name}. Only {available} available.'})
 
                 locked_cart_items = []
                 for item in cart_items:
@@ -360,7 +383,7 @@ class CheckoutView(generics.GenericAPIView):
                     locked_cart_items.append(item)
                 try:
                     quotes = quote_cart_items(locked_cart_items, serializer.validated_data['shipping_city'])
-                except ShippingQuoteError as error:
+                except ValueError as error:
                     raise ValidationError({'shipping_city': str(error)}) from error
                 quote_totals = _shipping_quote_payload(quotes)
                 if doorstep_quote is not None:
@@ -462,22 +485,31 @@ class CheckoutView(generics.GenericAPIView):
                 sellers = set()
                 for cart_item in cart_items:
                     product = products_locked[cart_item.product.id]
-                    line_total = (product.price * cart_item.quantity).quantize(MONEY)
+                    option = selected_option(product, cart_item.option_id)
+                    unit_price = item_price(cart_item)
+                    line_total = (unit_price * cart_item.quantity).quantize(MONEY)
                     commission = (line_total * COMMISSION_RATE).quantize(MONEY, rounding=ROUND_HALF_UP)
                     OrderItem.objects.create(
                         order=order,
                         product=product,
                         quantity=cart_item.quantity,
-                        price_at_purchase=product.price,
+                        price_at_purchase=unit_price,
                         price_unit_at_purchase=product.price_unit,
+                        option_label_at_purchase=option['label'] if option else '',
+                        option_id_at_purchase=cart_item.option_id,
                         seller=product.store.owner,
                         commission_rate=COMMISSION_RATE,
                         commission_amount=commission,
                         seller_proceeds=line_total - commission,
                     )
                     sellers.add(product.store.owner)
-                    product.stock_quantity -= cart_item.quantity
-                    product.save(update_fields=['stock_quantity', 'updated_at'])
+                    if option:
+                        option['stock_quantity'] -= cart_item.quantity
+                        product.stock_quantity -= cart_item.quantity
+                        product.save(update_fields=['price_options', 'stock_quantity', 'updated_at'])
+                    else:
+                        product.stock_quantity -= cart_item.quantity
+                        product.save(update_fields=['stock_quantity', 'updated_at'])
 
                 if payment_method == PaymentMethod.WALLET:
                     for fulfillment in fulfillments.values():
@@ -737,10 +769,24 @@ class SellerOrderStatusUpdateView(generics.GenericAPIView):
                     .filter(order=order, seller=request.user)
                     .select_related('product')
                 )
+                restock_products = {
+                    product.id: product for product in Product.objects.select_for_update().filter(
+                        id__in=[item.product_id for item in items if item.product_id],
+                    )
+                }
                 for item in items:
                     if item.product_id:
-                        item.product.stock_quantity += item.quantity
-                        item.product.save(update_fields=['stock_quantity', 'updated_at'])
+                        product = restock_products[item.product_id]
+                        if item.option_id_at_purchase:
+                            option = next((option for option in product.price_options if option['id'] == str(item.option_id_at_purchase)), None)
+                            if option:
+                                option['stock_quantity'] += item.quantity
+                                if option.get('active', True):
+                                    product.stock_quantity += item.quantity
+                        else:
+                            product.stock_quantity += item.quantity
+                for product in restock_products.values():
+                    product.save(update_fields=['price_options', 'stock_quantity', 'updated_at'])
                 fulfillment.status = OrderStatus.CANCELLED
                 fulfillment.settlement_status = SettlementStatus.REVERSED
                 fulfillment.save(update_fields=['status', 'settlement_status', 'updated_at'])

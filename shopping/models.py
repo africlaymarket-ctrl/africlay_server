@@ -21,10 +21,12 @@ class CartItem(TimestampedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     cart = models.ForeignKey(Cart, on_delete=models.CASCADE, related_name='items')
     product = models.ForeignKey('product_management.Product', on_delete=models.CASCADE)
+    option_id = models.UUIDField(null=True, blank=True)
     quantity = models.PositiveIntegerField(validators=[MinValueValidator(1)])
 
     class Meta:
-        unique_together = ('cart', 'product')
+        unique_together = ('cart', 'product', 'option_id')
+        constraints = [models.UniqueConstraint(fields=['cart', 'product'], condition=models.Q(option_id__isnull=True), name='unique_base_cart_product')]
 
     def __str__(self):
         return f"{self.quantity}x {self.product.name} in {self.cart.buyer.email}'s cart"
@@ -142,6 +144,8 @@ class OrderItem(TimestampedModel):
     quantity = models.PositiveIntegerField(validators=[MinValueValidator(1)])
     price_at_purchase = models.DecimalField(max_digits=12, decimal_places=2)
     price_unit_at_purchase = models.CharField(max_length=32, blank=True, default='')
+    option_label_at_purchase = models.CharField(max_length=60, blank=True, default='')
+    option_id_at_purchase = models.UUIDField(null=True, blank=True)
     commission_rate = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal('0.1000'))
     commission_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
     seller_proceeds = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
@@ -149,7 +153,8 @@ class OrderItem(TimestampedModel):
 
 
     class Meta:
-        unique_together = ('order', 'product')
+        unique_together = ('order', 'product', 'option_id_at_purchase')
+        constraints = [models.UniqueConstraint(fields=['order', 'product'], condition=models.Q(option_id_at_purchase__isnull=True), name='unique_base_order_product')]
 
     def __str__(self):
         return f"{self.quantity}x {self.product.name} in Order {self.order.id}"

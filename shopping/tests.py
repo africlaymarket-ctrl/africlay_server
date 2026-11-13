@@ -8,6 +8,7 @@ from decimal import Decimal
 from authapp.models import UserRole
 from authapp.utils import generate_access_token
 from product_management.models import Product
+import uuid
 from shopping.models import Cart, Order, OrderStatus, PaymentStatus
 from store_management.models import Store
 from payments.models import Wallet, WalletTransaction
@@ -308,6 +309,91 @@ class CheckoutApiTests(TestCase):
     def authenticate_as(self, user):
         token = generate_access_token(user)
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+
+    def test_named_price_choices_keep_prices_stock_and_order_snapshots_separate(self):
+        self.authenticate_as(self.buyer)
+        small, large = str(uuid.uuid4()), str(uuid.uuid4())
+        self.product.price_options = [
+            {'id': small, 'label': 'Small', 'price': '80.00', 'stock_quantity': 3, 'weight_kg': '1.000', 'active': True},
+            {'id': large, 'label': 'Large', 'price': '150.00', 'stock_quantity': 2, 'weight_kg': '2.000', 'active': True},
+        ]
+        self.product.price = Decimal('80.00')
+        self.product.stock_quantity = 5
+        self.product.save()
+        for option_id in (small, large):
+            added = self.client.post(reverse('shopping:cart-item-list'), {'product': str(self.product.id), 'option_id': option_id, 'quantity': 1}, format='json')
+            self.assertEqual(added.status_code, status.HTTP_201_CREATED, added.data)
+        cart = self.client.get(reverse('shopping:cart-detail'))
+        self.assertEqual(len(cart.data['items']), 2)
+        self.assertEqual({str(item['product_price']) for item in cart.data['items']}, {'80.00', '150.00'})
+        payload = {'shipping_address': '123 Main St', 'shipping_city': 'Nairobi', 'shipping_postal_code': '00100', 'shipping_country': 'Kenya'}
+        quote = self.client.post(reverse('shopping:shipping-quote'), payload, format='json')
+        self.assertEqual(quote.status_code, status.HTTP_200_OK, quote.data)
+        self.assertEqual(Decimal(quote.data['item_subtotal']), Decimal('230.00'))
+        self.assertEqual(Decimal(quote.data['shipments'][0]['actual_weight_kg']), Decimal('3.000'))
+        checkout = self.client.post(reverse('shopping:checkout'), payload, format='json')
+        self.assertEqual(checkout.status_code, status.HTTP_201_CREATED, checkout.data)
+        self.assertEqual({item['option_label_at_purchase'] for item in checkout.data['items']}, {'Small', 'Large'})
+        self.product.refresh_from_db()
+        self.assertEqual([option['stock_quantity'] for option in self.product.price_options], [2, 1])
+        self.assertEqual(self.product.stock_quantity, 3)
+
+    def test_buy_now_requires_selected_choice_and_uses_its_price(self):
+        self.authenticate_as(self.buyer)
+        option_id = str(uuid.uuid4())
+        self.product.price_options = [{'id': option_id, 'label': 'Large', 'price': '150.00', 'stock_quantity': 2, 'weight_kg': '2.000', 'active': True}]
+        self.product.stock_quantity = 2
+        self.product.save()
+        payload = {'shipping_address': '123 Main St', 'shipping_city': 'Nairobi', 'shipping_postal_code': '00100', 'shipping_country': 'Kenya', 'buy_now_product_id': str(self.product.id), 'buy_now_quantity': 1}
+        missing = self.client.post(reverse('shopping:shipping-quote'), payload, format='json')
+        self.assertEqual(missing.status_code, status.HTTP_400_BAD_REQUEST)
+        payload['buy_now_option_id'] = option_id
+        quote = self.client.post(reverse('shopping:shipping-quote'), payload, format='json')
+        self.assertEqual(quote.status_code, status.HTTP_200_OK, quote.data)
+        self.assertEqual(Decimal(quote.data['item_subtotal']), Decimal('150.00'))
+        checkout = self.client.post(reverse('shopping:checkout'), payload, format='json')
+        self.assertEqual(checkout.status_code, status.HTTP_201_CREATED, checkout.data)
+        self.assertEqual(checkout.data['items'][0]['option_label_at_purchase'], 'Large')
+
+    def test_named_price_choice_is_required_and_stale_choice_is_rejected(self):
+        self.authenticate_as(self.buyer)
+        option_id = str(uuid.uuid4())
+        self.product.price_options = [{'id': option_id, 'label': 'Large', 'price': '150.00', 'stock_quantity': 1, 'weight_kg': '2.000', 'active': True}]
+        self.product.save()
+        missing = self.client.post(reverse('shopping:cart-item-list'), {'product': str(self.product.id), 'quantity': 1}, format='json')
+        self.assertEqual(missing.status_code, status.HTTP_400_BAD_REQUEST)
+        added = self.client.post(reverse('shopping:cart-item-list'), {'product': str(self.product.id), 'option_id': option_id, 'quantity': 1}, format='json')
+        self.assertEqual(added.status_code, status.HTTP_201_CREATED)
+        self.product.price_options[0]['active'] = False
+        self.product.save()
+        quote = self.client.post(reverse('shopping:shipping-quote'), {'shipping_address': '123 Main St', 'shipping_city': 'Nairobi', 'shipping_postal_code': '00100', 'shipping_country': 'Kenya'}, format='json')
+        self.assertEqual(quote.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('option', str(quote.data).lower())
+
+    def test_seller_cancellation_restores_each_named_choice(self):
+        self.authenticate_as(self.buyer)
+        ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+        self.product.price_options = [
+            {'id': ids[0], 'label': 'Small', 'price': '80.00', 'stock_quantity': 3, 'weight_kg': '1.000', 'active': True},
+            {'id': ids[1], 'label': 'Large', 'price': '150.00', 'stock_quantity': 2, 'weight_kg': '2.000', 'active': True},
+        ]
+        self.product.stock_quantity = 5
+        self.product.save()
+        wallet = Wallet.objects.create(user=self.buyer, currency='KES')
+        credit_wallet(wallet, Decimal('1000.00'), 'provider:variant-cancellation')
+        for option_id in ids:
+            self.client.post(reverse('shopping:cart-item-list'), {'product': str(self.product.id), 'option_id': option_id, 'quantity': 1}, format='json')
+        checkout = self.client.post(reverse('shopping:checkout'), {
+            'shipping_address': '123 Main St', 'shipping_city': 'Nairobi', 'shipping_postal_code': '00100',
+            'shipping_country': 'Kenya', 'payment_method': 'wallet',
+        }, format='json')
+        self.assertEqual(checkout.status_code, status.HTTP_201_CREATED, checkout.data)
+        self.authenticate_as(self.seller)
+        cancelled = self.client.patch(reverse('shopping:seller-order-status', args=[checkout.data['id']]), {'status': 'cancelled'}, format='json')
+        self.assertEqual(cancelled.status_code, status.HTTP_200_OK, cancelled.data)
+        self.product.refresh_from_db()
+        self.assertEqual([option['stock_quantity'] for option in self.product.price_options], [3, 2])
+        self.assertEqual(self.product.stock_quantity, 5)
 
     def test_successful_checkout_creates_order(self):
         """Test that successful checkout creates an order and clears cart."""

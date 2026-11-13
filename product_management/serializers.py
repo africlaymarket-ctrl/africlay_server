@@ -146,7 +146,7 @@ class ProductSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
         fields = [
-            'id', 'store', 'category', 'tags', 'images', 'name', 'slug', 'description', 'sku', 'price', 'price_unit',
+            'id', 'store', 'category', 'tags', 'images', 'name', 'slug', 'description', 'sku', 'price', 'price_unit', 'price_options',
             'currency', 'stock_quantity', 'weight_kg', 'length_cm', 'width_cm', 'height_cm',
             'status', 'created_at', 'updated_at',
         ]
@@ -161,6 +161,59 @@ class ProductSerializer(serializers.ModelSerializer):
             unit = unit[4:].strip()
         return unit
 
+    def validate_price_options(self, value):
+        import uuid
+        from decimal import Decimal, InvalidOperation
+
+        if not isinstance(value, list) or len(value) > 12:
+            raise serializers.ValidationError('Add no more than 12 price options.')
+        seen_ids, seen_labels, cleaned = set(), set(), []
+        for raw in value:
+            if not isinstance(raw, dict):
+                raise serializers.ValidationError('Each price option needs a label, price, stock and weight.')
+            label = str(raw.get('label', '')).strip()
+            if not label or len(label) > 60 or label.casefold() in seen_labels:
+                raise serializers.ValidationError('Use a distinct label of up to 60 characters for each option.')
+            try:
+                option_id = str(uuid.UUID(str(raw.get('id') or uuid.uuid4())))
+                price = Decimal(str(raw['price']))
+                weight = Decimal(str(raw['weight_kg']))
+                stock = int(raw['stock_quantity'])
+                if (price <= 0 or price > Decimal('9999999999.99') or price.as_tuple().exponent < -2
+                        or weight <= 0 or weight > Decimal('99999.999') or weight.as_tuple().exponent < -3
+                        or stock < 0 or stock > 2147483647 or str(raw['stock_quantity']) != str(stock)):
+                    raise ValueError()
+            except (KeyError, TypeError, ValueError, InvalidOperation):
+                raise serializers.ValidationError('Enter a positive price, whole-number stock and positive shipping weight for every option.')
+            if option_id in seen_ids:
+                raise serializers.ValidationError('Duplicate price option.')
+            seen_ids.add(option_id)
+            seen_labels.add(label.casefold())
+            cleaned.append({'id': option_id, 'label': label, 'price': str(price), 'stock_quantity': stock, 'weight_kg': str(weight), 'active': True})
+        if self.instance:
+            old = {option['id']: option for option in self.instance.price_options or []}
+            for option in cleaned:
+                if option['id'] in old and not old[option['id']].get('active', True):
+                    raise serializers.ValidationError('An inactive option cannot be reused. Add a new option instead.')
+            for option_id, option in old.items():
+                if option_id not in seen_ids:
+                    cleaned.append({**option, 'active': False})
+        return cleaned
+
+    def _priced_values(self, validated_data):
+        options = validated_data.get('price_options', self.instance.price_options if self.instance else [])
+        active = [option for option in options if option.get('active', True)]
+        if active:
+            validated_data['price'] = min(Decimal(option['price']) for option in active)
+            validated_data['stock_quantity'] = sum(option['stock_quantity'] for option in active)
+        return validated_data
+
+    def create(self, validated_data):
+        return super().create(self._priced_values(validated_data))
+
+    def update(self, instance, validated_data):
+        return super().update(instance, self._priced_values(validated_data))
+
     def validate(self, attrs):
         attrs = super().validate(attrs)
         status = attrs.get('status', getattr(self.instance, 'status', None))
@@ -169,6 +222,9 @@ class ProductSerializer(serializers.ModelSerializer):
             field: attrs.get(field, getattr(self.instance, field, None))
             for field in ('weight_kg', 'length_cm', 'width_cm', 'height_cm')
         }
+        options = attrs.get('price_options', getattr(self.instance, 'price_options', []))
+        if any(option.get('active', True) for option in options) and any(measurements[field] is not None for field in ('length_cm', 'width_cm', 'height_cm')):
+            raise serializers.ValidationError({'shipping': 'Price choices use their own shipping weights. Clear shared package dimensions before saving.'})
 
         if status == 'published':
             if category is None:

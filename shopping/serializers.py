@@ -35,13 +35,37 @@ class CartItemSerializer(serializers.ModelSerializer):
     product = serializers.UUIDField(read_only=True, source='product_id')
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_slug = serializers.CharField(source='product.slug', read_only=True)
-    product_price = serializers.DecimalField(source='product.price', read_only=True, max_digits=10, decimal_places=2)
+    product_price = serializers.SerializerMethodField()
     price_unit = serializers.CharField(source='product.price_unit', read_only=True)
+    option_label = serializers.SerializerMethodField()
+    available_stock = serializers.SerializerMethodField()
+
+    def get_product_price(self, obj):
+        from product_management.pricing import item_price
+        try:
+            return item_price(obj)
+        except ValueError:
+            return None
+
+    def get_option_label(self, obj):
+        from product_management.pricing import selected_option
+        try:
+            option = selected_option(obj.product, obj.option_id)
+            return option['label'] if option else ''
+        except ValueError:
+            return ''
+
+    def get_available_stock(self, obj):
+        from product_management.pricing import item_stock
+        try:
+            return item_stock(obj)
+        except ValueError:
+            return 0
 
     class Meta:
         model = CartItem
-        fields = ['id', 'product', 'product_name', 'product_slug', 'product_price', 'price_unit', 'quantity']
-        read_only_fields = ['id', 'product']
+        fields = ['id', 'product', 'product_name', 'product_slug', 'product_price', 'price_unit', 'option_id', 'option_label', 'available_stock', 'quantity']
+        read_only_fields = ['id', 'product', 'option_id', 'product_price', 'option_label', 'available_stock']
 
 
 class CartSerializer(serializers.ModelSerializer):
@@ -64,7 +88,7 @@ class OrderItemDetailSerializer(serializers.ModelSerializer):
         model = OrderItem
         fields = [
             'id', 'product_id', 'product_name', 'product_slug', 'quantity',
-            'price_at_purchase', 'price_unit_at_purchase', 'seller_id',
+            'price_at_purchase', 'price_unit_at_purchase', 'option_label_at_purchase', 'seller_id',
         ]
         read_only_fields = fields
 
@@ -354,9 +378,10 @@ class CreateCheckoutSerializer(serializers.Serializer):
     )
     buy_now_product_id = serializers.UUIDField(required=False)
     buy_now_quantity = serializers.IntegerField(required=False, min_value=1, max_value=99)
+    buy_now_option_id = serializers.UUIDField(required=False)
 
     def validate(self, attrs):
-        if 'buy_now_quantity' in attrs and 'buy_now_product_id' not in attrs:
+        if ('buy_now_quantity' in attrs or 'buy_now_option_id' in attrs) and 'buy_now_product_id' not in attrs:
             raise serializers.ValidationError({
                 'buy_now_product_id': 'A product is required when a Buy Now quantity is provided.',
             })

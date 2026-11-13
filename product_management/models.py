@@ -56,6 +56,9 @@ class Product(TimestampedModel):
 	sku = models.CharField(max_length=80)
 	price = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0.01'))])
 	price_unit = models.CharField(max_length=32, blank=True, default='')
+	# Optional named sale choices, each with its own price, stock and shipping weight.
+	# A product without choices continues to use the fields above and below.
+	price_options = models.JSONField(default=list, blank=True)
 	currency = models.CharField(max_length=3, default='KES')
 	stock_quantity = models.PositiveIntegerField(default=0)
 	weight_kg = models.DecimalField(
