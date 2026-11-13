@@ -55,6 +55,7 @@ class Product(TimestampedModel):
 	description = models.TextField(blank=True, default='')
 	sku = models.CharField(max_length=80)
 	price = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0.01'))])
+	price_unit = models.CharField(max_length=32, blank=True, default='')
 	currency = models.CharField(max_length=3, default='KES')
 	stock_quantity = models.PositiveIntegerField(default=0)
 	weight_kg = models.DecimalField(

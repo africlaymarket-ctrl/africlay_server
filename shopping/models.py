@@ -141,6 +141,7 @@ class OrderItem(TimestampedModel):
     product = models.ForeignKey('product_management.Product', on_delete=models.SET_NULL, null=True)
     quantity = models.PositiveIntegerField(validators=[MinValueValidator(1)])
     price_at_purchase = models.DecimalField(max_digits=12, decimal_places=2)
+    price_unit_at_purchase = models.CharField(max_length=32, blank=True, default='')
     commission_rate = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal('0.1000'))
     commission_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
     seller_proceeds = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))

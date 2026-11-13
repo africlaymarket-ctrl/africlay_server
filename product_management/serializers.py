@@ -146,7 +146,7 @@ class ProductSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
         fields = [
-            'id', 'store', 'category', 'tags', 'images', 'name', 'slug', 'description', 'sku', 'price',
+            'id', 'store', 'category', 'tags', 'images', 'name', 'slug', 'description', 'sku', 'price', 'price_unit',
             'currency', 'stock_quantity', 'weight_kg', 'length_cm', 'width_cm', 'height_cm',
             'status', 'created_at', 'updated_at',
         ]
@@ -154,6 +154,12 @@ class ProductSerializer(serializers.ModelSerializer):
 
     def validate_currency(self, value):
         return value.upper()
+
+    def validate_price_unit(self, value):
+        unit = value.strip()
+        if unit.lower().startswith('per '):
+            unit = unit[4:].strip()
+        return unit
 
     def validate(self, attrs):
         attrs = super().validate(attrs)

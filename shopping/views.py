@@ -469,6 +469,7 @@ class CheckoutView(generics.GenericAPIView):
                         product=product,
                         quantity=cart_item.quantity,
                         price_at_purchase=product.price,
+                        price_unit_at_purchase=product.price_unit,
                         seller=product.store.owner,
                         commission_rate=COMMISSION_RATE,
                         commission_amount=commission,

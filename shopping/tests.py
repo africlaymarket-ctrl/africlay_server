@@ -312,13 +312,16 @@ class CheckoutApiTests(TestCase):
     def test_successful_checkout_creates_order(self):
         """Test that successful checkout creates an order and clears cart."""
         self.authenticate_as(self.buyer)
+        self.product.price_unit = 'kg'
+        self.product.save(update_fields=['price_unit'])
         
         # Add products to cart
-        self.client.post(
+        cart_item = self.client.post(
             reverse('shopping:cart-item-list'),
             {'product': str(self.product.id), 'quantity': 2},
             format='json',
         )
+        self.assertEqual(cart_item.data['price_unit'], 'kg')
         self.client.post(
             reverse('shopping:cart-item-list'),
             {'product': str(self.product2.id), 'quantity': 1},
@@ -342,6 +345,11 @@ class CheckoutApiTests(TestCase):
         self.assertEqual(checkout_response.data['status'], 'pending')
         self.assertEqual(float(checkout_response.data['total_amount']), 2720.00)
         self.assertEqual(len(checkout_response.data['items']), 2)
+        self.assertEqual(next(item for item in checkout_response.data['items'] if item['product_id'] == str(self.product.id))['price_unit_at_purchase'], 'kg')
+        self.product.price_unit = 'bunch'
+        self.product.save(update_fields=['price_unit'])
+        order_detail = self.client.get(reverse('shopping:order-detail', args=[checkout_response.data['id']]))
+        self.assertEqual(next(item for item in order_detail.data['items'] if item['product_id'] == str(self.product.id))['price_unit_at_purchase'], 'kg')
         
         # Verify cart is now empty
         cart_response = self.client.get(reverse('shopping:cart-detail'))

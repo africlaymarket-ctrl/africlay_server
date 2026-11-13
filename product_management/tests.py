@@ -60,6 +60,26 @@ class ProductApiTests(TestCase):
 		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 		self.assertEqual(response.data['store'], str(self.store.id))
 		self.assertEqual(response.data['price'], '1800.00')
+		self.assertEqual(response.data['price_unit'], '')
+
+	def test_sale_unit_round_trips_through_seller_and_public_product_api(self):
+		self.approve_store_kyc()
+		self.authenticate_as(self.seller)
+		created = self.client.post(
+			reverse('product_management:product-manage-list'),
+			{**self.product_data, 'status': 'published', 'price_unit': 'piece'}, format='json',
+		)
+		self.assertEqual(created.status_code, status.HTTP_201_CREATED, created.data)
+		self.assertEqual(created.data['price_unit'], 'piece')
+		updated = self.client.patch(
+			reverse('product_management:product-manage-detail', args=[created.data['id']]),
+			{'price_unit': 'per bunch'}, format='json',
+		)
+		self.assertEqual(updated.status_code, status.HTTP_200_OK, updated.data)
+		self.assertEqual(updated.data['price_unit'], 'bunch')
+		self.client.credentials()
+		catalogue = self.client.get(reverse('product_management:product-list'))
+		self.assertEqual(catalogue.data['results'][0]['price_unit'], 'bunch')
 
 	def test_seller_cannot_create_product_for_another_store(self):
 		self.authenticate_as(self.seller)

@@ -36,10 +36,11 @@ class CartItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_slug = serializers.CharField(source='product.slug', read_only=True)
     product_price = serializers.DecimalField(source='product.price', read_only=True, max_digits=10, decimal_places=2)
+    price_unit = serializers.CharField(source='product.price_unit', read_only=True)
 
     class Meta:
         model = CartItem
-        fields = ['id', 'product', 'product_name', 'product_slug', 'product_price', 'quantity']
+        fields = ['id', 'product', 'product_name', 'product_slug', 'product_price', 'price_unit', 'quantity']
         read_only_fields = ['id', 'product']
 
 
@@ -63,7 +64,7 @@ class OrderItemDetailSerializer(serializers.ModelSerializer):
         model = OrderItem
         fields = [
             'id', 'product_id', 'product_name', 'product_slug', 'quantity',
-            'price_at_purchase', 'seller_id',
+            'price_at_purchase', 'price_unit_at_purchase', 'seller_id',
         ]
         read_only_fields = fields
 
