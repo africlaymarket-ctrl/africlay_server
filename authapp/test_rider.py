@@ -6,7 +6,7 @@ from django.test import override_settings
 from django.urls import reverse
 from rest_framework.test import APITestCase
 
-from authapp.models import AdminAuditLog, RiderApplication, RiderApplicationStatus, StaffRole
+from authapp.models import AdminAuditLog, RiderApplication, RiderApplicationStatus, StaffRole, UserStaffRole
 from notifications.models import Notification
 from shopping.models import PickupPoint
 
@@ -24,6 +24,21 @@ class RiderApplicationTests(APITestCase):
     @staticmethod
     def file(name):
         return SimpleUploadedFile(name, b'test private image bytes', content_type='image/jpeg')
+
+    def test_rider_dashboard_flag_requires_both_approval_and_logistics_role(self):
+        self.client.force_authenticate(self.rider)
+        self.assertFalse(self.client.get(reverse('authapp:user-me')).data['is_approved_rider'])
+        assignment = UserStaffRole.objects.create(user=self.rider, role=StaffRole.LOGISTICS, granted_by=self.admin)
+        self.assertFalse(self.client.get(reverse('authapp:user-me')).data['is_approved_rider'])
+        RiderApplication.objects.create(
+            user=self.rider, city='Nairobi', vehicle_type='Motorcycle',
+            vehicle_registration='KMX 100A', licence_number='DL-100',
+            identity_document='kyc/riders/test/id.jpg', licence_document='kyc/riders/test/licence.jpg',
+            status=RiderApplicationStatus.APPROVED,
+        )
+        self.assertTrue(self.client.get(reverse('authapp:user-me')).data['is_approved_rider'])
+        assignment.delete()
+        self.assertFalse(self.client.get(reverse('authapp:user-me')).data['is_approved_rider'])
 
     def test_rider_application_review_and_private_document_access(self):
         with tempfile.TemporaryDirectory() as directory, override_settings(MEDIA_ROOT=directory):
@@ -50,6 +65,9 @@ class RiderApplicationTests(APITestCase):
                 {'decision': 'approved', 'reason': 'Identity and driving licence checked.'}, format='json')
             self.assertEqual(reviewed.status_code, 200, reviewed.data)
             self.assertTrue(self.rider.has_staff_role(StaffRole.LOGISTICS))
+            self.client.force_authenticate(self.rider)
+            self.assertTrue(self.client.get(reverse('authapp:user-me')).data['is_approved_rider'])
+            self.client.force_authenticate(self.admin)
             self.assertTrue(Notification.objects.filter(user=self.rider, title='Rider application reviewed').exists())
             self.assertTrue(AdminAuditLog.objects.filter(action='rider_application_approved').exists())
             self.assertEqual(self.client.post(reverse('authapp:rider-application-review', args=[app_id]),

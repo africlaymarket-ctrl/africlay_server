@@ -1065,7 +1065,7 @@ class RiderHomeDeliveryAssignmentView(generics.GenericAPIView):
                 create_notification(get_user_model().objects.get(pk=previous_id), title='Delivery assignment changed',
                                     message='A delivery previously assigned to you has been reassigned.')
             rider_notice = create_notification(rider, title='New delivery assigned',
-                message=f'Order {str(leg.order_id)[:8]}: a paid doorstep delivery is ready for your review. Open Logistics and accept it before the deadline.')
+                message=f'Order {str(leg.order_id)[:8]}: a paid doorstep delivery is ready for your review. Open My deliveries and accept it before the deadline.')
             from notifications.sms import queue_rider_assignment_sms, dispatch_notification_sms
             if settings.SMS_NOTIFICATIONS_ENABLED:
                 sms = queue_rider_assignment_sms(rider_notice)

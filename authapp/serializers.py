@@ -144,6 +144,7 @@ class UserSummarySerializer(serializers.ModelSerializer):
     profile = UserProfileSerializer(read_only=True)
     full_name = serializers.CharField(read_only=True)
     staff_roles = serializers.SerializerMethodField()
+    is_approved_rider = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -153,6 +154,7 @@ class UserSummarySerializer(serializers.ModelSerializer):
             'phone_number',
             'role',
             'staff_roles',
+            'is_approved_rider',
             'is_verified',
             'is_active',
             'full_name',
@@ -163,6 +165,13 @@ class UserSummarySerializer(serializers.ModelSerializer):
 
     def get_staff_roles(self, user):
         return list(user.staff_role_assignments.order_by('role').values_list('role', flat=True))
+
+    def get_is_approved_rider(self, user):
+        from authapp.models import RiderApplication, RiderApplicationStatus, StaffRole
+
+        return bool(user.has_staff_role(StaffRole.LOGISTICS) and RiderApplication.objects.filter(
+            user_id=user.pk, status=RiderApplicationStatus.APPROVED,
+        ).exists())
 
 
 class UserRegistrationSerializer(serializers.Serializer):
