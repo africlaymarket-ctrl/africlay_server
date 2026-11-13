@@ -9,7 +9,8 @@ from authapp.models import UserRole
 from authapp.utils import generate_access_token
 from product_management.models import Product
 import uuid
-from shopping.models import Cart, Order, OrderStatus, PaymentStatus
+from shopping.models import Cart, HomeDeliveryEvent, HomeDeliveryLeg, HomeDeliveryStage, Order, OrderStatus, PaymentStatus, PickupPoint, ShipmentEvent
+from shopping.serializers import RiderHomeDeliverySerializer
 from store_management.models import Store
 from payments.models import Wallet, WalletTransaction
 from payments.services import credit_wallet, hold_mpesa_seller_proceeds
@@ -309,6 +310,70 @@ class CheckoutApiTests(TestCase):
     def authenticate_as(self, user):
         token = generate_access_token(user)
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+
+    def test_buyer_tracking_hides_internal_notes_and_courier_reference(self):
+        self.authenticate_as(self.buyer)
+        self.client.post(reverse('shopping:cart-item-list'), {'product': str(self.product.id), 'quantity': 1}, format='json')
+        checkout = self.client.post(reverse('shopping:checkout'), {
+            'shipping_address': '123 Main St', 'shipping_city': 'Nairobi',
+            'shipping_postal_code': '00100', 'shipping_country': 'Kenya',
+        }, format='json')
+        self.assertEqual(checkout.status_code, status.HTTP_201_CREATED, checkout.data)
+        order = Order.objects.get(pk=checkout.data['id'])
+        order.courier_name = 'Internal Courier'
+        order.tracking_number = 'PRIVATE-REFERENCE'
+        order.save(update_fields=['courier_name', 'tracking_number'])
+        event = ShipmentEvent.objects.filter(fulfillment__order=order).first()
+        event.note = 'Private dispatch instructions and phone number'
+        event.save(update_fields=['note'])
+        buyer_detail = self.client.get(reverse('shopping:order-detail', args=[order.pk]))
+        self.assertEqual(buyer_detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(buyer_detail.data['courier_name'], '')
+        self.assertEqual(buyer_detail.data['tracking_number'], '')
+        buyer_fulfillment = buyer_detail.data['fulfillments'][0]
+        self.assertNotIn('settlement_status', buyer_fulfillment)
+        self.assertNotIn('origin_city', buyer_fulfillment)
+        self.assertNotIn('note', buyer_fulfillment['events'][0])
+        self.assertNotIn('source', buyer_fulfillment['events'][0])
+        buyer_list = self.client.get(reverse('shopping:order-list'))
+        self.assertEqual(buyer_list.status_code, status.HTTP_200_OK)
+        listed = next(item for item in buyer_list.data if str(item['id']) == str(order.pk))
+        self.assertEqual(listed['fulfillments'][0]['events'][0]['stage'], event.stage)
+        self.assertNotIn('note', listed['fulfillments'][0]['events'][0])
+        self.assertEqual(listed['courier_name'], '')
+        self.authenticate_as(self.seller)
+        seller_detail = self.client.get(reverse('shopping:seller-order-detail', args=[order.pk]))
+        self.assertEqual(seller_detail.status_code, status.HTTP_200_OK, seller_detail.data)
+        self.assertEqual(seller_detail.data['fulfillments'][0]['events'][0]['note'], event.note)
+
+    def test_buyer_home_tracking_hides_rider_assignment_and_notes(self):
+        self.authenticate_as(self.buyer)
+        self.client.post(reverse('shopping:cart-item-list'), {'product': str(self.product.id), 'quantity': 1}, format='json')
+        checkout = self.client.post(reverse('shopping:checkout'), {
+            'shipping_address': '123 Main St', 'shipping_city': 'Nairobi',
+            'shipping_postal_code': '00100', 'shipping_country': 'Kenya',
+        }, format='json')
+        self.assertEqual(checkout.status_code, status.HTTP_201_CREATED, checkout.data)
+        order = Order.objects.get(pk=checkout.data['id'])
+        point = PickupPoint.objects.create(name='Test pickup', city='Nairobi', address='Pickup entrance')
+        leg = HomeDeliveryLeg.objects.create(
+            order=order, pickup_point=point, pickup_address_snapshot='Pickup entrance',
+            destination_address='123 Main St', destination_city='Nairobi',
+            destination_latitude='-1.280000', destination_longitude='36.820000',
+            distance_meters='2500.00', fee='187.50', status=HomeDeliveryStage.RIDER_ASSIGNED,
+        )
+        HomeDeliveryEvent.objects.create(leg=leg, stage=HomeDeliveryStage.RIDER_ASSIGNED, note='Private rider phone and assignment')
+        HomeDeliveryEvent.objects.create(leg=leg, stage=HomeDeliveryStage.COLLECTED_FROM_PICKUP, note='Private dispatch notes')
+        buyer_detail = self.client.get(reverse('shopping:order-detail', args=[order.pk]))
+        self.assertEqual(buyer_detail.status_code, status.HTTP_200_OK)
+        home = buyer_detail.data['home_delivery']
+        self.assertEqual(home['status'], HomeDeliveryStage.WAITING_FOR_PARCELS)
+        self.assertEqual([event['stage'] for event in home['events']], [HomeDeliveryStage.COLLECTED_FROM_PICKUP])
+        self.assertNotIn('note', home['events'][0])
+        rider_home = RiderHomeDeliverySerializer(leg).data
+        self.assertEqual(rider_home['status'], HomeDeliveryStage.RIDER_ASSIGNED)
+        self.assertEqual(len(rider_home['events']), 2)
+        self.assertEqual(rider_home['events'][0]['note'], 'Private rider phone and assignment')
 
     def test_named_price_choices_keep_prices_stock_and_order_snapshots_separate(self):
         self.authenticate_as(self.buyer)

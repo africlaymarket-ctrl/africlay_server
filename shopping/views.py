@@ -605,7 +605,7 @@ class OrderListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return Order.objects.filter(buyer=self.request.user).prefetch_related('items', 'fulfillments').order_by('-created_at')
+        return Order.objects.filter(buyer=self.request.user).prefetch_related('items', 'fulfillments__events').order_by('-created_at')
 
 
 class SellerOrderListView(generics.ListAPIView):

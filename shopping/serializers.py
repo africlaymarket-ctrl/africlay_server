@@ -108,6 +108,15 @@ class ShipmentEventSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class BuyerShipmentEventSerializer(serializers.ModelSerializer):
+    """Only verified milestones are visible to the buyer; notes and actors stay internal."""
+
+    class Meta:
+        model = ShipmentEvent
+        fields = ['id', 'stage', 'created_at']
+        read_only_fields = fields
+
+
 class HomeDeliveryEventSerializer(serializers.ModelSerializer):
     class Meta:
         model = HomeDeliveryEvent
@@ -115,8 +124,32 @@ class HomeDeliveryEventSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class BuyerHomeDeliveryEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = HomeDeliveryEvent
+        fields = ['id', 'stage', 'created_at']
+        read_only_fields = fields
+
+
 class HomeDeliveryLegSerializer(serializers.ModelSerializer):
-    events = HomeDeliveryEventSerializer(many=True, read_only=True)
+    status = serializers.SerializerMethodField()
+    events = serializers.SerializerMethodField()
+
+    def get_status(self, leg):
+        if leg.status in {HomeDeliveryStage.RIDER_ASSIGNED, HomeDeliveryStage.RIDER_ACCEPTED, HomeDeliveryStage.RIDER_DECLINED}:
+            return HomeDeliveryStage.WAITING_FOR_PARCELS
+        return leg.status
+
+    def get_events(self, leg):
+        public_stages = {
+            HomeDeliveryStage.WAITING_FOR_PARCELS,
+            HomeDeliveryStage.COLLECTED_FROM_PICKUP,
+            HomeDeliveryStage.RIDER_DELIVERED,
+            HomeDeliveryStage.BUYER_CONFIRMED,
+            HomeDeliveryStage.CANCELLED,
+        }
+        events = [event for event in leg.events.all() if event.stage in public_stages]
+        return BuyerHomeDeliveryEventSerializer(events, many=True).data
 
     class Meta:
         model = HomeDeliveryLeg
@@ -125,6 +158,8 @@ class HomeDeliveryLegSerializer(serializers.ModelSerializer):
 
 
 class RiderHomeDeliverySerializer(HomeDeliveryLegSerializer):
+    status = serializers.CharField(read_only=True)
+    events = HomeDeliveryEventSerializer(many=True, read_only=True)
     order_id = serializers.UUIDField(source='order.id', read_only=True)
     pickup_point = PickupPointSerializer(read_only=True)
     buyer_phone = serializers.CharField(source='order.buyer.phone_number', read_only=True)
@@ -225,15 +260,12 @@ class OrderFulfillmentSummarySerializer(OrderFulfillmentSerializer):
 
 class BuyerOrderFulfillmentSerializer(serializers.ModelSerializer):
     seller_id = serializers.UUIDField(source='seller.id', read_only=True)
-    events = ShipmentEventSerializer(many=True, read_only=True)
+    events = BuyerShipmentEventSerializer(many=True, read_only=True)
 
     class Meta:
         model = OrderFulfillment
         fields = [
-            'id', 'seller_id', 'status', 'shipping_cost', 'actual_weight_kg',
-            'volumetric_weight_kg', 'chargeable_weight_kg', 'origin_city',
-            'destination_city', 'courier_name', 'tracking_number', 'shipped_at',
-            'settlement_status', 'events',
+            'id', 'seller_id', 'status', 'shipping_cost', 'events',
         ]
         read_only_fields = fields
 
@@ -251,6 +283,14 @@ class OrderDetailSerializer(serializers.ModelSerializer):
     amount_due = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     pickup_point = PickupPointSerializer(read_only=True)
     home_delivery = HomeDeliveryLegSerializer(read_only=True)
+    courier_name = serializers.SerializerMethodField()
+    tracking_number = serializers.SerializerMethodField()
+
+    def get_courier_name(self, order):
+        return ''
+
+    def get_tracking_number(self, order):
+        return ''
 
     class Meta:
         model = Order
@@ -266,7 +306,7 @@ class OrderDetailSerializer(serializers.ModelSerializer):
 
 
 class OrderListSerializer(OrderDetailSerializer):
-    fulfillments = BuyerOrderFulfillmentSummarySerializer(many=True, read_only=True)
+    fulfillments = BuyerOrderFulfillmentSerializer(many=True, read_only=True)
 
 
 class SellerOrderDetailSerializer(OrderDetailSerializer):
