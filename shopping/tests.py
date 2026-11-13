@@ -355,6 +355,25 @@ class CheckoutApiTests(TestCase):
         self.assertEqual(checkout.status_code, status.HTTP_201_CREATED, checkout.data)
         self.assertEqual(checkout.data['items'][0]['option_label_at_purchase'], 'Large')
 
+    def test_catalogue_price_moves_to_next_available_choice(self):
+        self.authenticate_as(self.buyer)
+        small, large = str(uuid.uuid4()), str(uuid.uuid4())
+        self.product.price_options = [
+            {'id': small, 'label': 'Small', 'price': '80.00', 'stock_quantity': 1, 'weight_kg': '1.000', 'active': True},
+            {'id': large, 'label': 'Large', 'price': '150.00', 'stock_quantity': 2, 'weight_kg': '2.000', 'active': True},
+        ]
+        self.product.price = Decimal('80.00')
+        self.product.stock_quantity = 3
+        self.product.save()
+        response = self.client.post(reverse('shopping:checkout'), {
+            'shipping_address': '123 Main St', 'shipping_city': 'Nairobi', 'shipping_postal_code': '00100',
+            'shipping_country': 'Kenya', 'buy_now_product_id': str(self.product.id), 'buy_now_option_id': small,
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.price, Decimal('150.00'))
+        self.assertEqual(self.product.stock_quantity, 2)
+
     def test_named_price_choice_is_required_and_stale_choice_is_rejected(self):
         self.authenticate_as(self.buyer)
         option_id = str(uuid.uuid4())

@@ -13,7 +13,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from authapp.models import AdminAuditLog, StaffRole, RiderApplicationStatus, UserRole
 from authapp.permissions import IsAuthenticated, IsBuyer, IsLogistics, IsSeller, IsSuperAdmin, IsVerifiedUser
 from product_management.models import Product
-from product_management.pricing import selected_option, item_price, item_stock
+from product_management.pricing import selected_option, item_price, item_stock, available_option_price
 
 from payments.models import LedgerEntryType, Wallet, WalletBalanceSource, WalletTransactionType
 from payments.services import (
@@ -506,7 +506,8 @@ class CheckoutView(generics.GenericAPIView):
                     if option:
                         option['stock_quantity'] -= cart_item.quantity
                         product.stock_quantity -= cart_item.quantity
-                        product.save(update_fields=['price_options', 'stock_quantity', 'updated_at'])
+                        product.price = available_option_price(product.price_options, product.price)
+                        product.save(update_fields=['price_options', 'price', 'stock_quantity', 'updated_at'])
                     else:
                         product.stock_quantity -= cart_item.quantity
                         product.save(update_fields=['stock_quantity', 'updated_at'])
@@ -786,7 +787,9 @@ class SellerOrderStatusUpdateView(generics.GenericAPIView):
                         else:
                             product.stock_quantity += item.quantity
                 for product in restock_products.values():
-                    product.save(update_fields=['price_options', 'stock_quantity', 'updated_at'])
+                    if product.price_options:
+                        product.price = available_option_price(product.price_options, product.price)
+                    product.save(update_fields=['price_options', 'price', 'stock_quantity', 'updated_at'])
                 fulfillment.status = OrderStatus.CANCELLED
                 fulfillment.settlement_status = SettlementStatus.REVERSED
                 fulfillment.save(update_fields=['status', 'settlement_status', 'updated_at'])

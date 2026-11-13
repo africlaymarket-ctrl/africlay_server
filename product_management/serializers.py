@@ -201,10 +201,11 @@ class ProductSerializer(serializers.ModelSerializer):
         return cleaned
 
     def _priced_values(self, validated_data):
+        from .pricing import available_option_price
         options = validated_data.get('price_options', self.instance.price_options if self.instance else [])
         active = [option for option in options if option.get('active', True)]
         if active:
-            validated_data['price'] = min(Decimal(option['price']) for option in active)
+            validated_data['price'] = available_option_price(options, validated_data.get('price', self.instance.price if self.instance else None))
             validated_data['stock_quantity'] = sum(option['stock_quantity'] for option in active)
         return validated_data
 
