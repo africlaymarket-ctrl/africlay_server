@@ -14,10 +14,13 @@ from rest_framework.response import Response
 
 from authapp.models import AdminAuditLog, RiderApplication, RiderApplicationStatus, StaffRole, UserStaffRole
 from authapp.permissions import IsSuperAdmin, IsVerifiedUser
+from authapp.utils import send_account_notice_email
 from notifications.models import create_notification
+from utility_services.utils import normalize_phone_number, valid_sms_phone
 
 
 class RiderApplicationSerializer(serializers.ModelSerializer):
+    phone_number = serializers.CharField(write_only=True, required=False, max_length=20)
     identity_document = serializers.FileField(write_only=True, required=True)
     licence_document = serializers.FileField(write_only=True, required=True)
     has_identity_document = serializers.SerializerMethodField()
@@ -30,7 +33,7 @@ class RiderApplicationSerializer(serializers.ModelSerializer):
     class Meta:
         model = RiderApplication
         fields = [
-            'id', 'applicant_email', 'applicant_phone', 'city', 'vehicle_type',
+            'id', 'applicant_email', 'applicant_phone', 'phone_number', 'city', 'vehicle_type',
             'vehicle_registration', 'licence_number', 'identity_document',
             'licence_document', 'has_identity_document', 'has_licence_document',
             'identity_document_url', 'licence_document_url',
@@ -58,12 +61,18 @@ class RiderApplicationSerializer(serializers.ModelSerializer):
             if upload:
                 from core.models import validate_document_upload
                 validate_document_upload(upload)
-        if attrs.get('sms_alerts'):
-            from utility_services.utils import normalize_phone_number, valid_sms_phone
-            phone = normalize_phone_number(self.context['request'].user.phone_number)
-            if not valid_sms_phone(phone):
-                raise serializers.ValidationError({'sms_alerts': 'Add a valid Kenyan mobile number to your account to receive SMS alerts.'})
+        phone = attrs.get('phone_number') or normalize_phone_number(self.context['request'].user.phone_number)
+        if not valid_sms_phone(phone):
+            raise serializers.ValidationError({'phone_number': 'Enter a valid Kenyan mobile number to apply.'})
         return attrs
+
+    def validate_phone_number(self, value):
+        phone = normalize_phone_number(value)
+        if not valid_sms_phone(phone):
+            raise serializers.ValidationError('Enter a valid Kenyan mobile number, such as 0712345678.')
+        if get_user_model().objects.filter(phone_number=phone).exclude(pk=self.context['request'].user.pk).exists():
+            raise serializers.ValidationError('This phone number belongs to another account.')
+        return phone
 
     def validate_city(self, value):
         from shopping.models import PickupPoint
@@ -95,15 +104,29 @@ class RiderApplicationMineView(generics.GenericAPIView):
         return Response(self.get_serializer(application).data)
 
     def post(self, request):
-        if not request.user.phone_number:
-            raise ValidationError({'phone_number': 'Add a phone number to your account before applying.'})
         with transaction.atomic():
-            get_user_model().objects.select_for_update().get(pk=request.user.pk)
+            user = get_user_model().objects.select_for_update().get(pk=request.user.pk)
             existing = RiderApplication.objects.filter(user=request.user).first()
             if existing and existing.status != RiderApplicationStatus.REJECTED:
                 raise ValidationError({'application': 'This application is already under review or approved.'})
             serializer = self.get_serializer(data=request.data)
             serializer.is_valid(raise_exception=True)
+            phone = serializer.validated_data.pop('phone_number', None)
+            if phone and user.phone_number != phone:
+                user.phone_number = phone
+                user.save(update_fields=['phone_number'])
+                request.user.phone_number = phone
+                profile = user.profile
+                preferences = profile.notification_preferences if isinstance(profile.notification_preferences, dict) else {}
+                profile.notification_preferences = {
+                    **preferences,
+                    **{key: False for key in preferences if key.startswith('sms_')},
+                }
+                profile.save(update_fields=['notification_preferences'])
+                transaction.on_commit(lambda: send_account_notice_email(
+                    user.email, 'AfriClay phone number changed',
+                    'The phone number on your AfriClay account was changed during rider application. If this was not you, contact AfriClay support immediately.',
+                ))
             application = serializer.save(
                 user=request.user, status=RiderApplicationStatus.PENDING,
                 reviewed_at=None, reviewed_by=None, review_reason='',

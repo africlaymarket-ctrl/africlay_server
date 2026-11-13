@@ -72,3 +72,52 @@ class RiderApplicationTests(APITestCase):
             self.assertEqual(app.status, RiderApplicationStatus.PENDING)
             self.assertEqual(app.city, 'Eldoret')
             self.assertIsNone(result.data['identity_document_url'])
+
+    def test_rider_can_supply_missing_account_phone_in_application(self):
+        self.rider.phone_number = None
+        self.rider.save(update_fields=['phone_number'])
+        self.client.force_authenticate(self.rider)
+        with tempfile.TemporaryDirectory() as directory, override_settings(MEDIA_ROOT=directory):
+            missing = self.client.post(reverse('authapp:rider-application-mine'), {
+                'city': 'Nairobi', 'vehicle_type': 'Motorcycle', 'vehicle_registration': 'KMX 100A',
+                'licence_number': 'DL-100', 'identity_document': self.file('id.jpg'),
+                'licence_document': self.file('licence.jpg'),
+            }, format='multipart')
+            self.assertEqual(missing.status_code, 400)
+            self.assertIn('phone_number', missing.data)
+            invalid = self.client.post(reverse('authapp:rider-application-mine'), {
+                'phone_number': '12345', 'city': 'Nairobi', 'vehicle_type': 'Motorcycle',
+                'vehicle_registration': 'KMX 100A', 'licence_number': 'DL-100',
+                'identity_document': self.file('id.jpg'), 'licence_document': self.file('licence.jpg'),
+            }, format='multipart')
+            self.assertEqual(invalid.status_code, 400)
+            self.assertIn('phone_number', invalid.data)
+            self.assertFalse(RiderApplication.objects.filter(user=self.rider).exists())
+            created = self.client.post(reverse('authapp:rider-application-mine'), {
+                'phone_number': '0712345678', 'city': 'Nairobi', 'vehicle_type': 'Motorcycle',
+                'vehicle_registration': 'KMX 100A', 'licence_number': 'DL-100', 'sms_alerts': 'true',
+                'identity_document': self.file('id.jpg'), 'licence_document': self.file('licence.jpg'),
+            }, format='multipart')
+            self.assertEqual(created.status_code, 201, created.data)
+            self.rider.refresh_from_db()
+            self.assertEqual(self.rider.phone_number, '254712345678')
+            self.assertEqual(created.data['applicant_phone'], '254712345678')
+            self.assertTrue(created.data['sms_alerts'])
+
+    def test_rider_application_rejects_another_accounts_phone(self):
+        other = get_user_model().objects.create_user(
+            email='other-rider@example.com', password='StrongPassword123!',
+            phone_number='254700000000', is_verified=True,
+        )
+        self.client.force_authenticate(self.rider)
+        with tempfile.TemporaryDirectory() as directory, override_settings(MEDIA_ROOT=directory):
+            response = self.client.post(reverse('authapp:rider-application-mine'), {
+                'phone_number': '0700000000', 'city': 'Nairobi', 'vehicle_type': 'Motorcycle',
+                'vehicle_registration': 'KMX 100A', 'licence_number': 'DL-100',
+                'identity_document': self.file('id.jpg'), 'licence_document': self.file('licence.jpg'),
+            }, format='multipart')
+            self.assertEqual(response.status_code, 400)
+            self.assertIn('phone_number', response.data)
+            self.rider.refresh_from_db()
+            self.assertEqual(self.rider.phone_number, '254712345678')
+            self.assertFalse(RiderApplication.objects.filter(user=self.rider).exists())
