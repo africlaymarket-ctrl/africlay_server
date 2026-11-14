@@ -6,6 +6,7 @@ import jwt
 from django.conf import settings
 from django.utils import timezone
 from django.contrib.auth import get_user_model
+from django.db import transaction
 from django.core.mail import send_mail
 from django.template.loader import render_to_string
 from django.utils.html import strip_tags
@@ -94,6 +95,7 @@ def blacklist_token(token):
         return False
 
 
+@transaction.atomic
 def refresh_access_token(refresh_token):
     """Validate refresh token, blacklist the old one, and issue fresh tokens."""
     if not refresh_token:
@@ -105,15 +107,15 @@ def refresh_access_token(refresh_token):
         raise AuthenticationFailed('Invalid token type. Expected a refresh token.')
 
     jti = payload.get('jti')
-    if jti and is_token_blacklisted(jti):
-        raise AuthenticationFailed('Refresh token has been revoked.')
+    if not jti:
+        raise AuthenticationFailed('Invalid refresh token payload.')
 
     user_id = payload.get('user_id')
     if not user_id:
         raise AuthenticationFailed('Invalid token payload.')
 
     try:
-        user = User.objects.get(id=user_id)
+        user = User.objects.select_for_update().get(id=user_id)
     except User.DoesNotExist:
         raise AuthenticationFailed('User not found.')
 
@@ -123,9 +125,15 @@ def refresh_access_token(refresh_token):
     if payload.get('auth_version', 0) != user.auth_version:
         raise AuthenticationFailed('Session permissions have changed. Please log in again.')
 
-    # Blacklist used refresh token for rotation security
-    if jti:
-        blacklist_token(refresh_token)
+    # Serialize rotations for this user so a concurrent replay cannot issue another pair.
+    from .models import BlacklistedToken
+    if BlacklistedToken.objects.filter(token_id=jti).exists():
+        raise AuthenticationFailed('Refresh token has been revoked.')
+    BlacklistedToken.objects.create(
+        token_id=jti,
+        user=user,
+        expires_at=datetime.fromtimestamp(payload['exp'], tz=dt_timezone.utc),
+    )
 
     return {
         'access': generate_access_token(user),

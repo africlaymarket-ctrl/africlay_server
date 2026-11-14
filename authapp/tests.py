@@ -253,6 +253,16 @@ class AuthTestCase(TestCase):
         self.assertIn('access', response.data)
         self.assertIn('refresh', response.data)
 
+    def test_refresh_token_cannot_be_replayed(self):
+        refresh_token = generate_refresh_token(self.user)
+        url = reverse('authapp:token-refresh')
+        first = self.client.post(url, {'refresh': refresh_token}, format='json')
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        replay = self.client.post(url, {'refresh': refresh_token}, format='json')
+        self.assertEqual(replay.status_code, status.HTTP_401_UNAUTHORIZED)
+        rotated = self.client.post(url, {'refresh': first.data['refresh']}, format='json')
+        self.assertEqual(rotated.status_code, status.HTTP_200_OK)
+
     def test_user_logout(self):
         """Test POST /api/auth/logout/ blacklists refresh token."""
         access_token = generate_access_token(self.user)
